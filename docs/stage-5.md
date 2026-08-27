@@ -59,23 +59,38 @@ problem #1: one query tells you exactly where an order is and how it got there.
 When a step fails, the orchestrator sends the compensating command for **each
 forward step that already succeeded, in reverse order**:
 
-| failed at | compensations sent |
+| failure | compensations sent |
 |---|---|
-| charge | none — nothing succeeded yet → straight to CANCELLED |
-| reserve | `cmd.payment.refund` |
-| dispatch | `cmd.inventory.release`, then `cmd.payment.refund` |
+| `reply.payment.failed` | none — the charge didn't happen → straight to CANCELLED |
+| `reply.inventory.failed` | `cmd.payment.refund` |
+| `reply.shipping.failed` | `cmd.inventory.release`, then `cmd.payment.refund` |
+
+A **real `reply.*.failed`** means the service confirmed the step did not happen,
+so it's not compensated — only the steps before it.
 
 Each service handles its compensating command (`cmd.payment.refund` deletes the
 payment row and decrements the ledger; `cmd.inventory.release` puts the stock
-back) and replies. When the last compensating reply lands, the saga goes
-CANCELLED and emits `order.cancelled`.
+back) and replies. Compensating handlers are **idempotent no-ops when the forward
+action never happened** — `cmd.inventory.release` for an unreserved order deletes
+0 rows and adds back 0 stock. That property is what makes the timeout path safe.
+When the last compensating reply lands, the saga goes CANCELLED and emits
+`order.cancelled`.
 
 ### The timeout watchdog
 
-A background thread in the orchestrator polls: any saga that has been *awaiting a
-reply* for longer than `STEP_TIMEOUT_S` (30s) is treated as a failed step, and
-compensation begins. That's what stops a silently-dead service from hanging an
-order forever — problem #2's second half.
+A background thread in the orchestrator polls: any saga *awaiting a reply* for
+longer than `STEP_TIMEOUT_S` (30s) is treated as a failed step, and compensation
+begins. That's what stops a silently-dead service from hanging an order forever.
+
+**A timeout is not the same as a failure.** `reply.payment.failed` means "it
+definitely didn't happen". A timeout means "I don't know" — the service could be
+slow and still apply the change and reply late. So on a timeout the orchestrator
+compensates the timed-out step **too** (`include_failed_step=True`), and if a
+late reply arrives during or after compensation, it fires one more
+`cmd.inventory.release` (with a distinct event_id so it isn't deduped) to mop up
+the orphaned stock. This is the fiddly reality of compensation: you compensate
+against uncertainty, and every compensating action has to be safe to run when
+there's nothing to undo.
 
 ## What carried over
 
@@ -117,10 +132,11 @@ Then the dashboard Scenarios row, or `make`:
   shipment.
 
 - **▶ Stage 5 — silent inventory → timeout**
-  Makes inventory take 90s (effectively dead), places 1 order. Charge succeeds,
-  then reserve never answers. After 30s the watchdog fires: `timeout` in the
-  saga log → refund → CANCELLED. Note only the *charge* is compensated — reserve
-  never completed, so there's nothing to release.
+  Puts inventory in "silent" mode: it *does* reserve the stock but sends **no
+  reply**. Places 1 order. Charge succeeds; then the orchestrator waits. After
+  30s the watchdog fires: `timeout` in the saga log → `cmd.inventory.release`
+  (undoes the reservation the silent service made) + `cmd.payment.refund` →
+  CANCELLED. The consistency panel stays green — the held stock is released.
 
 - **✗ orchestrator** kill button — SIGKILL the orchestrator mid-workflow. On
   restart it reloads every saga from `orchestrator_db.sagas` and the watchdog
@@ -139,8 +155,8 @@ docker compose exec postgres psql -U demo -d orchestrator_db \
 - [ ] happy path: `make demo-stage-1`-style flow → all sagas COMPLETED, consistent
 - [ ] `make demo-stage-5` → saga log shows dispatch fail → release → refund →
       CANCELLED; consistency panel green
-- [ ] silent-inventory scenario → `timeout` entry in the saga log → CANCELLED,
-      only the charge compensated
+- [ ] silent-inventory scenario → `timeout` entry → release + refund →
+      CANCELLED; `reservations` unchanged (the held stock was released)
 - [ ] kill the orchestrator mid-workflow → it recovers from Postgres on restart
 - [ ] Stage 3 regression: duplicate mode + 10 orders → all COMPLETED, consistent
 

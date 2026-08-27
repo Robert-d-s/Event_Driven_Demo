@@ -128,12 +128,13 @@ export function App() {
   async function runTimeoutScenario() {
     setScenario("timeout");
     try {
-      await sendControl("inventory", "slow_ms", 90000); // effectively silent
+      await sendControl("inventory", "silent", true);
       await sleep(500);
       await placeOrders(1);
-      // charge ok, reserve never answers → 30s watchdog → refund → CANCELLED
+      // charge ok; inventory reserves the stock but sends no reply → 30s
+      // watchdog → release (undoes the reservation) + refund → CANCELLED
       await sleep(40000);
-      await sendControl("inventory", "slow_ms", 0);
+      await sendControl("inventory", "silent", false);
     } finally {
       setScenario(null);
     }

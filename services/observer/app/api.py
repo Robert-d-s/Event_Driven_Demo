@@ -47,7 +47,7 @@ def health() -> dict:
 
 class Command(BaseModel):
     target: str = "all"  # "payment" | "inventory" | "shipping" | "all"
-    action: str  # "fail" | "slow_ms" | "duplicate" | "pause_relay"
+    action: str  # "fail" | "slow_ms" | "silent" | "duplicate" | "pause_relay"
     value: bool | int
 
 

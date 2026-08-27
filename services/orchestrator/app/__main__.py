@@ -66,15 +66,18 @@ def _on_command(command: dict) -> None:
 # the caller already holds, so they commit with the state change.
 # ---------------------------------------------------------------------------
 
-def _emit(cur, order_id: int, routing_key: str, body: dict) -> None:
-    eid = f"{routing_key}:{order_id}"  # deterministic — services dedupe
+def _emit(cur, order_id: int, routing_key: str, body: dict, *, suffix: str = "") -> None:
+    # event_id is deterministic so services dedupe — but a defensive re-release
+    # needs a DISTINCT id or the receiving service would dedupe it as the first
+    # release. `suffix` gives it one.
+    eid = f"{routing_key}:{order_id}{suffix}"
     stage_event(
         cur,
         event_id=eid,
         routing_key=routing_key,
         body={"event_id": eid, "order_id": order_id, **body},
     )
-    saga.log(cur, order_id, "command", routing_key)
+    saga.log(cur, order_id, "command", routing_key + (f" ({suffix.lstrip('.')})" if suffix else ""))
 
 
 def _send_step(cur, order_id: int, step: str, total_cents: int) -> None:
@@ -84,17 +87,32 @@ def _send_step(cur, order_id: int, step: str, total_cents: int) -> None:
     saga.set_state(cur, order_id, state, awaiting=step)
 
 
-def _begin_compensation(cur, order_id: int, failed_step: str, total_cents: int) -> None:
+def _begin_compensation(
+    cur,
+    order_id: int,
+    failed_step: str,
+    total_cents: int,
+    *,
+    include_failed_step: bool,
+) -> None:
     """
-    A step failed (or timed out). Undo the steps that already succeeded, in
-    reverse order, by sending their compensating commands. Steps before
-    `failed_step` succeeded; `failed_step` itself and anything after did not.
+    A step failed or timed out. Send compensating commands for the completed
+    forward steps, in reverse order.
+
+    `include_failed_step`:
+      - False (a real reply.*.failed): the step definitely did NOT happen — the
+        service told us so. Compensate only the steps *before* it.
+      - True (a timeout): "no reply" does NOT mean "didn't happen" — the service
+        might just be slow, and could still apply the change and reply late. So
+        compensate the failed step too. Every compensating handler is a safe
+        no-op if the forward action never happened (e.g. inventory.release
+        deletes 0 rows and adds back 0 stock).
     """
-    done = STEPS[: STEPS.index(failed_step)]  # completed forward steps
-    comps = [STEP_COMPENSATE[s] for s in reversed(done) if s in STEP_COMPENSATE]
+    up_to = STEPS.index(failed_step) + (1 if include_failed_step else 0)
+    to_undo = STEPS[:up_to]
+    comps = [STEP_COMPENSATE[s] for s in reversed(to_undo) if s in STEP_COMPENSATE]
 
     if not comps:
-        # nothing to undo (charge itself failed) — straight to cancelled
         saga.set_state(cur, order_id, "CANCELLING", awaiting=None, comp_pending=0)
         _finish_cancelled(cur, order_id, reason=f"{failed_step} failed")
         return
@@ -146,10 +164,25 @@ def _handle_reply(cur, msg: Message) -> None:
             remaining = saga.dec_comp_pending(cur, order_id)
             if remaining <= 0:
                 _finish_cancelled(cur, order_id, reason="compensated")
+        elif rk == "reply.inventory.reserved":
+            # A slow inventory reserved stock AFTER we timed it out and started
+            # compensating. Release it again with a distinct event_id so
+            # inventory doesn't dedupe it as the first release.
+            saga.log(cur, order_id, "state", "late reserve during compensation — re-releasing")
+            _emit(
+                cur, order_id, "cmd.inventory.release",
+                {"amount_cents": s.total_cents}, suffix=".late",
+            )
         return
 
     if s.state in ("CANCELLED", "COMPLETED", "CANCELLING"):
-        return  # terminal — ignore late replies
+        if rk == "reply.inventory.reserved":
+            saga.log(cur, order_id, "state", "late reserve after cancel — re-releasing")
+            _emit(
+                cur, order_id, "cmd.inventory.release",
+                {"amount_cents": s.total_cents}, suffix=".late",
+            )
+        return
 
     # --- forward replies ---------------------------------------------
     if s.awaiting is None:
@@ -162,7 +195,10 @@ def _handle_reply(cur, msg: Message) -> None:
         else:
             _finish_completed(cur, order_id)
     elif rk == STEP_FAIL[step]:
-        _begin_compensation(cur, order_id, step, s.total_cents)
+        # a real "failed" reply — the service confirmed the step did not happen
+        _begin_compensation(
+            cur, order_id, step, s.total_cents, include_failed_step=False
+        )
 
 
 def _timeout_watchdog(dsn: str) -> None:
@@ -182,7 +218,11 @@ def _timeout_watchdog(dsn: str) -> None:
                 stuck = cur.fetchall()
                 for order_id, step, total in stuck:
                     saga.log(cur, order_id, "timeout", f"{step} timed out after {STEP_TIMEOUT_S}s")
-                    _begin_compensation(cur, order_id, step, total)
+                    # a timeout is "unknown", not "didn't happen" — compensate the
+                    # timed-out step too, in case the slow service applies it later
+                    _begin_compensation(
+                        cur, order_id, step, total, include_failed_step=True
+                    )
             db.commit()
         except Exception as err:  # noqa: BLE001
             db.rollback()

@@ -37,6 +37,10 @@ SCHEMA = (pathlib.Path(__file__).parent / "schema.sql").read_text()
 _state = {
     "slow_ms": int(os.environ.get("SLOW_MS", "0")),
     "fail": os.environ.get("FAIL_INVENTORY", "false").lower() == "true",
+    # "silent": do the reserve (hold the stock) but DON'T send the reply. That's
+    # a genuinely unresponsive service — the orchestrator's watchdog has to time
+    # it out, and the stock really is held, so the compensating release matters.
+    "silent": False,
 }
 
 
@@ -56,6 +60,9 @@ def _on_command(command: dict) -> None:
     elif action == "fail":
         _state["fail"] = bool(command.get("value"))
         print(f"[inventory] fail -> {_state['fail']}", flush=True)
+    elif action == "silent":
+        _state["silent"] = bool(command.get("value"))
+        print(f"[inventory] silent -> {_state['silent']}", flush=True)
 
 
 def _reply(cur, order_id: int, routing_key: str, **extra) -> None:
@@ -87,7 +94,10 @@ def main() -> None:
         cmd = msg.routing_key
         sku, qty = "WIDGET-1", 1
 
-        if _state["slow_ms"]:
+        # The slow toggle only delays the FORWARD step (reserve). A compensating
+        # release must stay fast — it's unwinding a doomed order, and if it were
+        # also slow the orchestrator could never converge on a timed-out saga.
+        if _state["slow_ms"] and cmd == "cmd.inventory.reserve":
             time.sleep(_state["slow_ms"] / 1000)
 
         with handle_once(db, msg.event_id) as u:
@@ -107,20 +117,35 @@ def main() -> None:
                     "ON CONFLICT (order_id) DO NOTHING",
                     (order_id, sku, qty),
                 )
-                _reply(u.cur, order_id, "reply.inventory.reserved")
-                print(f"[inventory] order {order_id}: reserved {qty}x {sku}", flush=True)
+                if _state["silent"]:
+                    # stock is held, but we send NO reply — the orchestrator will
+                    # time this step out, and the compensating release undoes it.
+                    print(
+                        f"[inventory] order {order_id}: reserved {qty}x {sku} "
+                        f"— NOT replying (silent mode)",
+                        flush=True,
+                    )
+                else:
+                    _reply(u.cur, order_id, "reply.inventory.reserved")
+                    print(f"[inventory] order {order_id}: reserved {qty}x {sku}", flush=True)
 
             elif cmd == "cmd.inventory.release":
-                # compensation — put the stock back
+                # Compensation — put the stock back. Idempotent and safe even if
+                # nothing was reserved: DELETE removes the row (or 0 rows), and
+                # we add back exactly what we removed (or 0). So a release for an
+                # order that was never reserved is a genuine no-op — which is
+                # what lets the orchestrator fire release defensively on timeout.
                 u.cur.execute(
                     "DELETE FROM reservations WHERE order_id = %s RETURNING qty",
                     (order_id,),
                 )
                 row = u.cur.fetchone()
-                released = row[0] if row else qty
-                u.cur.execute(
-                    "UPDATE stock SET qty = qty + %s WHERE sku = %s", (released, sku)
-                )
+                released = row[0] if row else 0
+                if released:
+                    u.cur.execute(
+                        "UPDATE stock SET qty = qty + %s WHERE sku = %s",
+                        (released, sku),
+                    )
                 _reply(u.cur, order_id, "reply.inventory.released", qty=released)
                 print(f"[inventory] order {order_id}: released {released}x {sku}", flush=True)
 
