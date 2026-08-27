@@ -1,0 +1,14 @@
+{
+  "venvPath": ".",
+  "venv": ".venv",
+  "extraPaths": ["libs/pyevents"],
+  "executionEnvironments": [
+    { "root": "libs/pyevents" },
+    { "root": "services/order-service" },
+    { "root": "services/payment-service" },
+    { "root": "services/inventory-service" },
+    { "root": "services/shipping-service" },
+    { "root": "services/observer" }
+  ],
+  "reportMissingModuleSource": "none"
+}

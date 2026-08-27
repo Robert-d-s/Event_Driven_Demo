@@ -1,0 +1,17 @@
+{
+  "name": "notification-service",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Deliberately written in TypeScript: proves the events are a language-neutral contract, not pickled Python.",
+  "scripts": {
+    "start": "node --experimental-strip-types src/index.ts"
+  },
+  "dependencies": {
+    "amqplib": "^0.10.4"
+  },
+  "devDependencies": {
+    "@types/amqplib": "^0.10.5",
+    "@types/node": "^22"
+  }
+}

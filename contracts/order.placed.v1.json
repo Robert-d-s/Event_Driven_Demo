@@ -1,0 +1,32 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "order.placed.v1",
+  "title": "OrderPlaced",
+  "description": "Emitted by order-service when a customer places an order. Routing key: order.placed",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["event_id", "order_id", "customer_id", "items", "total_cents", "placed_at"],
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "description": "Stable unique id for this event. Used for idempotency (stage 3). A redelivered copy carries the SAME event_id."
+    },
+    "order_id": { "type": "integer", "minimum": 1 },
+    "customer_id": { "type": "string" },
+    "items": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sku", "qty"],
+        "properties": {
+          "sku": { "type": "string" },
+          "qty": { "type": "integer", "minimum": 1 }
+        }
+      }
+    },
+    "total_cents": { "type": "integer", "minimum": 0 },
+    "placed_at": { "type": "string", "format": "date-time" }
+  }
+}

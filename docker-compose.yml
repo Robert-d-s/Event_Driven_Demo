@@ -1,0 +1,150 @@
+# Full stack for stages 0-1.
+#
+#   make up            build + start everything
+#   make demo-stage-1  place 20 orders and watch them flow
+#   open http://localhost:5173    dashboard
+#   open http://localhost:15672   RabbitMQ management (guest/guest)
+#
+# Build context is the repo root (.) for the Python services so their Dockerfile
+# can copy both libs/pyevents and the service's own directory.
+
+services:
+  # ---- infrastructure ------------------------------------------------------
+  rabbitmq:
+    image: rabbitmq:4-management
+    container_name: rabbitmq-broker
+    ports:
+      - "5672:5672" # AMQP
+      - "15672:15672" # management UI + HTTP API
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  postgres:
+    image: postgres:16
+    container_name: postgres-db
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: demo
+      POSTGRES_PASSWORD: demo
+      POSTGRES_DB: postgres
+    volumes:
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U demo"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # ---- one-shot: declare exchanges/queues/bindings, then exit -------------
+  topology:
+    build:
+      context: .
+      dockerfile: infra/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      BROKER_URL: amqp://guest:guest@rabbitmq:5672/%2F
+    restart: "no"
+
+  # ---- services ----------------------------------------------------------
+  order-service:
+    build:
+      context: .
+      dockerfile: services/Dockerfile.python
+      args:
+        SERVICE: order-service
+    ports:
+      - "8000:8000"
+    depends_on:
+      topology:
+        condition: service_completed_successfully
+    environment:
+      BROKER_URL: amqp://guest:guest@rabbitmq:5672/%2F
+
+  payment-service:
+    build:
+      context: .
+      dockerfile: services/Dockerfile.python
+      args:
+        SERVICE: payment-service
+    depends_on:
+      topology:
+        condition: service_completed_successfully
+    environment:
+      BROKER_URL: amqp://guest:guest@rabbitmq:5672/%2F
+      FAIL_PAYMENTS: "false" # stage 2 flips this
+    # Competing consumers: 3 replicas, all reading payment.q.
+    deploy:
+      replicas: 3
+
+  inventory-service:
+    build:
+      context: .
+      dockerfile: services/Dockerfile.python
+      args:
+        SERVICE: inventory-service
+    depends_on:
+      topology:
+        condition: service_completed_successfully
+    environment:
+      BROKER_URL: amqp://guest:guest@rabbitmq:5672/%2F
+      SLOW_MS: "0" # stage 2 raises this
+
+  shipping-service:
+    build:
+      context: .
+      dockerfile: services/Dockerfile.python
+      args:
+        SERVICE: shipping-service
+    depends_on:
+      topology:
+        condition: service_completed_successfully
+    environment:
+      BROKER_URL: amqp://guest:guest@rabbitmq:5672/%2F
+      FAIL_SHIPPING: "false" # stages 2 & 5 flip this
+
+  notification-service:
+    build:
+      context: .
+      dockerfile: services/notification-service/Dockerfile
+    depends_on:
+      topology:
+        condition: service_completed_successfully
+    environment:
+      BROKER_URL: amqp://guest:guest@rabbitmq:5672
+
+  observer:
+    build:
+      context: .
+      dockerfile: services/Dockerfile.python
+      args:
+        SERVICE: observer
+    ports:
+      - "8001:8001"
+    depends_on:
+      topology:
+        condition: service_completed_successfully
+    environment:
+      BROKER_URL: amqp://guest:guest@rabbitmq:5672/%2F
+      RABBITMQ_MGMT_URL: http://rabbitmq:15672
+
+  dashboard:
+    image: node:22-slim
+    working_dir: /app
+    command: sh -c "npm install && npm run dev"
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./dashboard:/app
+    environment:
+      # inside compose the proxy targets are service names, not localhost
+      VITE_PROXY_OBSERVER: http://observer:8001
+      VITE_PROXY_ORDERS: http://order-service:8000

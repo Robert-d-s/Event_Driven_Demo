@@ -1,0 +1,18 @@
+{
+  // Point Python tooling at the local dev venv (created with `python3 -m venv .venv`).
+  // The venv has pika + pyevents (editable) + the HTTP deps installed, so Pylance
+  // resolves imports. The services still RUN inside Docker — this is editor-only.
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+  "python.analysis.extraPaths": ["${workspaceFolder}/libs/pyevents"],
+  "python.analysis.autoImportCompletions": true,
+
+  // Each service dir is its own import root (app.*), so analysis doesn't get
+  // confused by the four identically-named `app` packages.
+  "python.analysis.diagnosticMode": "openFilesOnly",
+
+  "search.exclude": {
+    "**/node_modules": true,
+    "**/.venv": true,
+    "**/__pycache__": true
+  }
+}

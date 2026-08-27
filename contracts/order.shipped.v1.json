@@ -1,0 +1,15 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "order.shipped.v1",
+  "title": "OrderShipped",
+  "description": "Emitted by shipping-service once an order is dispatched. Routing key: order.shipped",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["event_id", "order_id", "tracking_code", "shipped_at"],
+  "properties": {
+    "event_id": { "type": "string" },
+    "order_id": { "type": "integer", "minimum": 1 },
+    "tracking_code": { "type": "string" },
+    "shipped_at": { "type": "string", "format": "date-time" }
+  }
+}

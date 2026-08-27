@@ -1,0 +1,14 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "stock.reserved.v1",
+  "title": "StockReserved",
+  "description": "Emitted by inventory-service after reserving stock for an order. Routing key: stock.reserved",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["event_id", "order_id", "reserved_at"],
+  "properties": {
+    "event_id": { "type": "string" },
+    "order_id": { "type": "integer", "minimum": 1 },
+    "reserved_at": { "type": "string", "format": "date-time" }
+  }
+}

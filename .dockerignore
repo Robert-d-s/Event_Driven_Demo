@@ -1,0 +1,11 @@
+# The Python service images build from the repo root (context: .), so keep the
+# local dev cruft out of the build context.
+.venv/
+**/node_modules/
+**/__pycache__/
+**/*.pyc
+.git/
+.vscode/
+dashboard/dist/
+docs/
+*.md

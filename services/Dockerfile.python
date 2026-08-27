@@ -1,0 +1,23 @@
+# Shared Dockerfile for the Python services. Each service passes its own
+# directory name as SERVICE and its entrypoint stays the same: python -m app.
+#
+# Build context is the repo root (see docker-compose.yml) so we can copy both
+# libs/pyevents and the service's own code.
+
+FROM python:3.13-slim
+
+ARG SERVICE
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+
+WORKDIR /srv
+
+# Shared transport library, installed once.
+COPY libs/pyevents /srv/libs/pyevents
+RUN pip install --no-cache-dir /srv/libs/pyevents
+
+# The service itself.
+COPY services/${SERVICE}/requirements.txt /srv/requirements.txt
+RUN pip install --no-cache-dir -r /srv/requirements.txt
+COPY services/${SERVICE}/app /srv/app
+
+CMD ["python", "-m", "app"]

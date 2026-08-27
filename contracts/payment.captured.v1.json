@@ -1,0 +1,15 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "payment.captured.v1",
+  "title": "PaymentCaptured",
+  "description": "Emitted by payment-service after successfully charging the customer. Routing key: payment.captured",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["event_id", "order_id", "amount_cents", "captured_at"],
+  "properties": {
+    "event_id": { "type": "string" },
+    "order_id": { "type": "integer", "minimum": 1 },
+    "amount_cents": { "type": "integer", "minimum": 0 },
+    "captured_at": { "type": "string", "format": "date-time" }
+  }
+}

@@ -1,0 +1,1 @@
+# consumer-only service — pyevents (pika) is installed by the base image
