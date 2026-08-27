@@ -6,30 +6,36 @@ OrderShipped is what order-service listens for to close the loop.
 
 --- Stage 2 -------------------------------------------------------------------
 
-`fail` toggle from the dashboard. On → 3 retries then shipping.q.dlq. (Stage 5
-reuses this to demonstrate compensation.)
+`fail` toggle → 3 retries then shipping.q.dlq. (Stage 5 reuses this for
+compensation.)
 
 --- Stage 3: idempotency ----------------------------------------------------
 
-`process_once` guards the shipment. A double-processed StockReserved would
-otherwise create a second OrderShipped, and order-service would mark the order
-shipped twice. The tracking code is derived from the order id so a re-publish on
-a duplicate carries the same OrderShipped (deterministic event_id "ship-<id>").
+Guarded shipment — a double-processed StockReserved is a no-op.
+
+--- Stage 4: the outbox ---------------------------------------------------
+
+OrderShipped is written to the `outbox` table in the same transaction as the
+shipment insert. One COMMIT; a relay thread drains it. No publish() call.
 """
 
 import os
 import pathlib
+import threading
 from datetime import datetime, timezone
 
 from pyevents import (
     connect,
     connect_db,
     consume,
+    handle_once,
     listen_for_commands,
-    process_once,
-    publish,
+    relay_loop,
     run_script,
     set_duplicate_mode,
+    set_relay_paused,
+    stage_event,
+    DB_URL,
     Message,
 )
 
@@ -42,8 +48,11 @@ _state = {"fail": os.environ.get("FAIL_SHIPPING", "false").lower() == "true"}
 
 def _on_command(command: dict) -> None:
     action = command.get("action")
-    if action == "duplicate":  # global
+    if action == "duplicate":
         set_duplicate_mode(bool(command.get("value")))
+        return
+    if action == "pause_relay":
+        set_relay_paused(bool(command.get("value")))
         return
     if command.get("target") != "shipping":
         return
@@ -58,6 +67,11 @@ def main() -> None:
     db = connect_db()
     run_script(db, SCHEMA)
 
+    threading.Thread(
+        target=relay_loop, args=(DB_URL,), kwargs={"exchange": EXCHANGE},
+        name="outbox-relay", daemon=True,
+    ).start()
+
     conn = connect()
     ch = conn.channel()
     ch.exchange_declare(exchange=EXCHANGE, exchange_type="topic", durable=True)
@@ -71,37 +85,36 @@ def main() -> None:
         if _state["fail"]:
             raise RuntimeError(f"no courier available for order {order_id} (simulated)")
 
-        with process_once(db, msg.event_id) as first_time:
-            if first_time:
-                with db.cursor() as cur:
-                    cur.execute(
-                        "INSERT INTO shipments (order_id, tracking_code) "
-                        "VALUES (%s, %s) ON CONFLICT (order_id) DO NOTHING",
-                        (order_id, tracking),
-                    )
-                print(
-                    f"[shipping-service] dispatched order {order_id} ({tracking}) "
-                    f"[attempt {msg.attempt}]",
-                    flush=True,
-                )
-            else:
+        with handle_once(db, msg.event_id) as u:
+            if not u.first_time:
                 print(
                     f"[shipping-service] duplicate StockReserved for order "
-                    f"{order_id} (event_id={msg.event_id}) — not shipping again",
+                    f"{order_id} — not shipping again",
                     flush=True,
                 )
+                return
 
-        publish(
-            ch,
-            exchange=EXCHANGE,
-            routing_key="order.shipped",
-            body={
-                "event_id": f"ship-{order_id}",
-                "order_id": order_id,
-                "tracking_code": tracking,
-                "shipped_at": datetime.now(timezone.utc).isoformat(),
-            },
-        )
+            u.cur.execute(
+                "INSERT INTO shipments (order_id, tracking_code) VALUES (%s, %s) "
+                "ON CONFLICT (order_id) DO NOTHING",
+                (order_id, tracking),
+            )
+            stage_event(
+                u.cur,
+                event_id=f"ship-{order_id}",
+                routing_key="order.shipped",
+                body={
+                    "event_id": f"ship-{order_id}",
+                    "order_id": order_id,
+                    "tracking_code": tracking,
+                    "shipped_at": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+            print(
+                f"[shipping-service] dispatched order {order_id} ({tracking}) "
+                f"+ staged OrderShipped [attempt {msg.attempt}]",
+                flush=True,
+            )
 
     consume(ch, queue=QUEUE, handler=handler)
 

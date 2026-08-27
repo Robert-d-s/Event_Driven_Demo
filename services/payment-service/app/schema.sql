@@ -23,3 +23,16 @@ CREATE TABLE IF NOT EXISTS ledger (
 );
 INSERT INTO ledger (id, total_charged_cents) VALUES (1, 0)
     ON CONFLICT (id) DO NOTHING;
+
+-- Stage 4: the transactional outbox. Handlers INSERT their outgoing events here
+-- in the SAME transaction as the state change; a relay (pyevents.relay_loop)
+-- publishes them to RabbitMQ and marks them published.
+CREATE TABLE IF NOT EXISTS outbox (
+    id           BIGSERIAL PRIMARY KEY,
+    event_id     TEXT NOT NULL,
+    routing_key  TEXT NOT NULL,
+    body         JSONB NOT NULL,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    published_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS outbox_unpublished ON outbox (id) WHERE published_at IS NULL;

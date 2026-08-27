@@ -147,8 +147,9 @@ docker compose exec postgres psql -U demo -d payment_db       # interactive; \dt
 ```
 
 Databases: `order_db`, `payment_db`, `inventory_db`, `shipping_db` — each owned
-by one service. If you'd rather use a local client, the server is published on
-`localhost:5432` (`brew install libpq` gives you `psql`).
+by one service. To use a local client instead, publish a host port for the
+`postgres` service in docker-compose.yml (it's commented out to avoid clashing
+with a local Postgres on 5432).
 
 ## Next
 

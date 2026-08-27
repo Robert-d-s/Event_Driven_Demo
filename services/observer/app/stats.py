@@ -58,6 +58,14 @@ def snapshot() -> dict:
         svc: (_one(DSNS[svc], "SELECT count(*) FROM processed_events") or [0])[0]
         for svc in DSNS
     }
+    # Stage 4: outbox rows still waiting for the relay. Non-zero briefly under
+    # load, or persistently if a relay is down / a service is stalled.
+    outbox_pending = {
+        svc: int(
+            (_one(DSNS[svc], "SELECT count(*) FROM outbox WHERE published_at IS NULL") or [0])[0]
+        )
+        for svc in DSNS
+    }
 
     # psycopg returns SUM() as Decimal and COUNT() as int — normalise to int so
     # the JSON is clean and comparisons are unambiguous.
@@ -80,6 +88,7 @@ def snapshot() -> dict:
         "stock_consumed": 100000 - stock_qty if stock_qty else 0,
         "shipments": ship_rows,
         "processed_events": dupes,
+        "outbox_pending": outbox_pending,
         # the two headline checks
         "consistent": (
             order_total == pay_total

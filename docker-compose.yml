@@ -28,10 +28,11 @@ services:
   postgres:
     image: postgres:16
     container_name: postgres-db
-    ports:
-      # If 5432 is taken by a local postgres, change the host side only
-      # (e.g. "5433:5432"); services connect via the internal network on 5432.
-      - "5432:5432"
+    # No host port by default — services reach it on the internal network as
+    # `postgres:5432`. To run psql from your host, uncomment and pick a free port:
+    #   ports: ["5432:5432"]
+    # then: psql postgresql://demo:demo@localhost:5432/<service>_db
+    # (or just: docker compose exec postgres psql -U demo -d <service>_db)
     environment:
       POSTGRES_USER: demo
       POSTGRES_PASSWORD: demo

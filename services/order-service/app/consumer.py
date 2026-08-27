@@ -21,6 +21,7 @@ from pyevents import (
     process_once,
     run_script,
     set_duplicate_mode,
+    set_relay_paused,
     Message,
 )
 
@@ -29,8 +30,11 @@ SCHEMA = (pathlib.Path(__file__).parent / "schema.sql").read_text()
 
 
 def _on_command(command: dict) -> None:
-    if command.get("action") == "duplicate":
+    action = command.get("action")
+    if action == "duplicate":
         set_duplicate_mode(bool(command.get("value")))
+    elif action == "pause_relay":
+        set_relay_paused(bool(command.get("value")))
 
 
 def run_consumer() -> None:

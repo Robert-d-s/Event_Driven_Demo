@@ -15,7 +15,16 @@ from .connection import connect, BROKER_URL, Channel
 from .publisher import publish, Publisher, set_duplicate_mode, duplicate_mode
 from .consumer import consume, Message
 from .control import listen_for_commands, publish_command
-from .db import connect_db, ensure_processed_events, process_once, run_script, DB_URL
+from .db import (
+    connect_db,
+    ensure_processed_events,
+    process_once,
+    handle_once,
+    Unit,
+    run_script,
+    DB_URL,
+)
+from .outbox import stage_event, relay_loop, set_relay_paused, relay_paused, OUTBOX_DDL
 
 __all__ = [
     "connect",
@@ -32,6 +41,13 @@ __all__ = [
     "connect_db",
     "ensure_processed_events",
     "process_once",
+    "handle_once",
+    "Unit",
     "run_script",
     "DB_URL",
+    "stage_event",
+    "relay_loop",
+    "set_relay_paused",
+    "relay_paused",
+    "OUTBOX_DDL",
 ]

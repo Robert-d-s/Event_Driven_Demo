@@ -299,3 +299,16 @@ button:disabled {
 .consistency tr.bad-row td {
   color: var(--bad);
 }
+
+/* --- stage 4: outbox rows in consistency panel --- */
+.consistency tr.subhead td {
+  color: var(--muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding-top: 6px;
+  border: none;
+}
+.consistency tr.warn-row td {
+  color: var(--warn);
+}

@@ -51,6 +51,7 @@ type Toggles = {
   shippingFail: boolean;
   inventorySlow: boolean;
   duplicate: boolean;
+  pauseRelay: boolean;
 };
 
 export function App() {
@@ -64,6 +65,7 @@ export function App() {
     shippingFail: false,
     inventorySlow: false,
     duplicate: false,
+    pauseRelay: false,
   });
 
   async function placeOrders(n: number) {
@@ -171,6 +173,15 @@ export function App() {
           }
         >
           {toggles.inventorySlow ? "✓ " : ""}slow inventory 8s
+        </button>
+        <button
+          className={toggles.pauseRelay ? "toggle on" : "toggle"}
+          title="freeze every outbox relay — staged events pile up in the DB instead of being published"
+          onClick={() =>
+            toggle("pauseRelay", (v) => sendControl("all", "pause_relay", v))
+          }
+        >
+          {toggles.pauseRelay ? "✓ " : ""}pause outbox relays
         </button>
         <a
           href="http://localhost:15672"
@@ -330,13 +341,30 @@ export function App() {
                     {stats.stock_consumed === stats.reservations ? "✓" : "✗"}
                   </td>
                 </tr>
+                <tr className="spacer">
+                  <td colSpan={3} />
+                </tr>
+                <tr>
+                  <td colSpan={3} className="subhead">
+                    outbox — events staged, not yet relayed
+                  </td>
+                </tr>
+                {Object.entries(stats.outbox_pending).map(([svc, n]) => (
+                  <tr key={svc} className={n > 0 ? "warn-row" : ""}>
+                    <td>{svc}</td>
+                    <td className="num">{n}</td>
+                    <td>{n > 0 ? "⧗" : "✓"}</td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           )}
           <p className="legend">
-            {toggles.duplicate
-              ? "duplicate mode ON — every event is published twice. These rows stay ✓ because consumers dedupe."
-              : "turn on “duplicate everything”, place orders, and watch these rows stay ✓."}
+            {toggles.pauseRelay
+              ? "relays paused — staged events pile up in the DB. SIGKILL a service now; on restart its relay drains the outbox and the order still completes. Nothing lost."
+              : toggles.duplicate
+              ? "duplicate mode ON — every event published twice. Rows stay ✓ because consumers dedupe."
+              : "outbox rows sit >0 only briefly. Try “pause outbox relays”, place orders, watch them pile up, then un-pause."}
           </p>
         </section>
       </div>

@@ -30,6 +30,7 @@ from __future__ import annotations
 import contextlib
 import os
 import time
+from dataclasses import dataclass
 from typing import Iterator
 
 import psycopg
@@ -75,12 +76,26 @@ def ensure_processed_events(conn: psycopg.Connection) -> None:
 def run_script(conn: psycopg.Connection, sql_text: str) -> None:
     """
     Execute a multi-statement SQL script (a schema.sql file read from disk) and
-    commit. psycopg's execute() is typed for LiteralString; a file's contents are
-    a runtime str, so this is the one sanctioned place we pass one through.
+    commit.
+
+    Guarded by a Postgres advisory lock: order-service runs this from three
+    threads at once (HTTP init, consumer thread, relay thread), and
+    `CREATE TABLE IF NOT EXISTS` is NOT safe under true concurrency — two
+    sessions can both pass the "not exists" check and one then fails with a
+    duplicate-key error on the system catalog. The advisory lock serialises
+    them; whoever gets there first creates the tables, the rest are no-ops.
+
+    psycopg's execute() is typed for LiteralString; a file's contents are a
+    runtime str, so this is the one sanctioned place we pass one through.
     """
     with conn.cursor() as cur:
+        cur.execute("SELECT pg_advisory_xact_lock(%s)", (_SCHEMA_LOCK_KEY,))
         cur.execute(sql_text)  # type: ignore[arg-type]  # DDL script from a trusted file
-    conn.commit()
+    conn.commit()  # releases the xact-scoped advisory lock
+
+
+# Arbitrary constant, shared by every caller so they contend on the same lock.
+_SCHEMA_LOCK_KEY = 0x5EED_5C4E  # "seed schema"
 
 
 @contextlib.contextmanager
@@ -120,3 +135,54 @@ def process_once(conn: psycopg.Connection, event_id: str) -> Iterator[bool]:
     except Exception:
         conn.rollback()
         raise
+
+
+@dataclass
+class Unit:
+    """
+    What `handle_once` hands the caller: whether this is the first time we've
+    seen the event, and a cursor to do the work + stage outbox events on. Every
+    statement run through `cur` — the state change AND the pyevents.stage_event
+    call — lands in one transaction that `handle_once` commits on clean exit.
+    """
+
+    first_time: bool
+    cur: psycopg.Cursor
+
+
+@contextlib.contextmanager
+def handle_once(conn: psycopg.Connection, event_id: str) -> Iterator[Unit]:
+    """
+    Stage 4's version of process_once. Same idempotency guarantee, but it also
+    yields the cursor so the handler can write its outgoing events to the outbox
+    table *in the same transaction* as the state change:
+
+        with handle_once(db, msg.event_id) as u:
+            if not u.first_time:
+                return
+            u.cur.execute("UPDATE payments SET ...")
+            stage_event(u.cur, event_id="pay-1", routing_key="payment.captured", body={...})
+        # one COMMIT here: processed_events + payments + outbox row, atomically
+
+    No separate publish() call anywhere — the relay drains the outbox.
+    """
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "INSERT INTO processed_events (event_id) VALUES (%s) "
+            "ON CONFLICT (event_id) DO NOTHING",
+            (event_id,),
+        )
+        is_first = cur.rowcount == 1
+
+        yield Unit(first_time=is_first, cur=cur)
+
+        if is_first:
+            conn.commit()
+        else:
+            conn.rollback()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()

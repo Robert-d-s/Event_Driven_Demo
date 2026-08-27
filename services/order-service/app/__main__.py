@@ -1,31 +1,34 @@
 """
 order-service entrypoint.
 
-This is the one Python service that has to do two things at once:
-  - serve HTTP  (POST /orders  — a customer places an order)
-  - consume events  (order.shipped -> mark the order complete)
+Three things run concurrently:
 
-pika is blocking and single-threaded, and a pika channel can't be shared across
-threads. So the design is:
+  main thread        -> uvicorn (FastAPI). POST /orders writes the order + an
+                        OrderPlaced outbox row in one transaction. Never touches
+                        RabbitMQ.
+  consumer thread    -> consume loop for OrderShipped. Own pika + psycopg conns.
+  relay thread       -> drains order_db.outbox to RabbitMQ. Own conns.
 
-  main thread        -> uvicorn (FastAPI). Owns its OWN connection+channel,
-                        used only to PUBLISH when an order comes in.
-  background thread  -> the consume loop. Owns a SEPARATE connection+channel.
-
-They never touch each other's channel. This is the pattern any service needs
-when it mixes a request/response API with a message consumer.
+pika is blocking and channels aren't thread-safe, so each thread that talks to
+the broker owns its own connection. The HTTP thread doesn't talk to the broker
+at all any more (Stage 4) — that's the outbox's whole point.
 """
 
 import threading
 
 import uvicorn
 
+from pyevents import relay_loop, DB_URL
+
 from .consumer import run_consumer
 
 if __name__ == "__main__":
-    # Consumer on its own thread with its own broker connection.
-    t = threading.Thread(target=run_consumer, name="order-consumer", daemon=True)
-    t.start()
+    threading.Thread(
+        target=run_consumer, name="order-consumer", daemon=True
+    ).start()
+    threading.Thread(
+        target=relay_loop, args=(DB_URL,), kwargs={"exchange": "orders"},
+        name="outbox-relay", daemon=True,
+    ).start()
 
-    # HTTP server on the main thread.
     uvicorn.run("app.api:app", host="0.0.0.0", port=8000, log_level="info")

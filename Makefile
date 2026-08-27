@@ -3,7 +3,7 @@
 # Stage 0-1 targets. Later stages add demo-stage-2 … demo-stage-5.
 
 .PHONY: help up down logs ps rebuild topology dashboard broker \
-        demo-stage-0 demo-stage-1 demo-stage-2 demo-stage-3 \
+        demo-stage-0 demo-stage-1 demo-stage-2 demo-stage-3 demo-stage-4 \
         chaos-poison chaos-kill-payment
 
 help: ## show this help
@@ -82,6 +82,32 @@ demo-stage-3: ## stage 3 — turn on "duplicate everything", place orders, prove
 	@echo "  Turn duplicate mode back off:"
 	@echo "   curl -XPOST localhost:8001/control -H 'content-type: application/json' \\"
 	@echo "     -d '{\"target\":\"all\",\"action\":\"duplicate\",\"value\":false}'"
+
+demo-stage-4: ## stage 4 — pause the relays, kill a service, watch the outbox survive
+	@echo "STAGE 4: the transactional outbox."
+	@echo "  1. pausing every outbox relay — staged events will pile up in the DB"
+	curl -s -XPOST localhost:8001/control -H 'content-type: application/json' \
+	  -d '{"target":"all","action":"pause_relay","value":true}' >/dev/null
+	@sleep 1
+	@echo "  2. placing 5 orders — each handler commits its work + an outbox row,"
+	@echo "     but nothing publishes because the relays are frozen"
+	./scripts/place_orders.sh 5
+	@sleep 3
+	@echo "  3. outbox_pending now (order-service has 5 unpublished OrderPlaced rows):"
+	@curl -s localhost:8001/stats | python3 -c "import sys,json; d=json.load(sys.stdin); print('    ', d['outbox_pending'], ' orders=%d shipments=%d' % (d['orders'], d['shipments']))"
+	@echo "  4. SIGKILL order-service — its process dies with 5 events still unpublished"
+	docker compose kill --signal=SIGKILL order-service
+	@sleep 2
+	@echo "     (pre-outbox: those 5 OrderPlaced events would be gone; orders stuck at PENDING forever)"
+	@echo "  5. un-pausing relays + restarting order-service"
+	curl -s -XPOST localhost:8001/control -H 'content-type: application/json' \
+	  -d '{"target":"all","action":"pause_relay","value":false}' >/dev/null
+	docker compose up -d order-service
+	@sleep 12
+	@echo "  6. final state:"
+	@curl -s localhost:8001/stats | python3 -c "import sys,json; d=json.load(sys.stdin); print(f\"     orders={d['orders']} shipments={d['shipments']} consistent={d['consistent']} outbox_pending={d['outbox_pending']}\")"
+	@echo "  All 5 orders completed. The events were durably on disk the whole time —"
+	@echo "  the relay picked up where it left off after the crash."
 
 chaos-poison: ## send an unparseable message — goes straight to DLQ, no retries
 	./scripts/poison.sh

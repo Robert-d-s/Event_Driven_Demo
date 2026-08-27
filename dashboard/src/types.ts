@@ -33,7 +33,7 @@ export interface OrderView {
   lastSeen: string;
 }
 
-// Cross-service consistency snapshot from observer /stats (stage 3).
+// Cross-service consistency snapshot from observer /stats (stage 3 + 4).
 export interface Stats {
   orders: number;
   orders_total_cents: number;
@@ -44,5 +44,6 @@ export interface Stats {
   stock_consumed: number;
   shipments: number;
   processed_events: Record<string, number>;
+  outbox_pending: Record<string, number>;
   consistent: boolean;
 }
