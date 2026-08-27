@@ -1,43 +1,31 @@
 """
-payment-service — consumer only.
+payment-service — command handler.
 
-Listens for OrderPlaced, "charges" the customer, emits PaymentCaptured.
+--- Stages 1-4: choreography ------------------------------------------------
 
-Runs as 3 replicas (docker-compose.yml). All three consume the SAME queue,
-payment.q — a "work queue" / "competing consumers".
+Consumed OrderPlaced off the "orders" topic exchange and emitted PaymentCaptured.
+Nobody was in charge — the flow was the sum of every service's bindings.
 
---- Stage 2 -------------------------------------------------------------------
+--- Stage 5: orchestration -------------------------------------------------
 
-`fail` toggle from the dashboard → the handler raises → retry/DLQ machinery.
+Now consumes explicit COMMANDS from payment.cmd.q and sends back a REPLY:
 
---- Stage 3: idempotency ----------------------------------------------------
+  cmd.payment.charge  → charge, then  reply.payment.charged  (or reply.payment.failed)
+  cmd.payment.refund  → refund, then  reply.payment.refunded    (compensation)
 
-Redelivery means this handler runs twice for the same OrderPlaced. The
-idempotency check makes the second run a no-op.
+The orchestrator decides what happens next. payment-service just does its one
+job and reports the outcome.
 
---- Stage 4: the outbox ---------------------------------------------------
-
-Before: handler did `UPDATE payments` (COMMIT), then `publish(PaymentCaptured)`.
-Two systems, one gap. A crash between them = charged but nobody downstream hears.
-Stage 3 covered it with a "re-publish on duplicate" hack in every handler.
-
-Now: the handler writes PaymentCaptured to the `outbox` TABLE inside the same
-transaction as the charge (`handle_once` yields the cursor for exactly this).
-One COMMIT: processed_events + payments + outbox row, atomically. A relay thread
-(pyevents.relay_loop) drains the outbox to RabbitMQ.
-
-No publish() call in this file any more. No re-publish hack. The gap is gone —
-the event is committed with the work or not at all.
-
-Each replica runs its own relay against the shared payment_db. They don't collide
-because the relay claims rows with `FOR UPDATE SKIP LOCKED` (see pyevents.outbox).
+Everything from the earlier stages still holds: 3 replicas on one command queue
+(competing consumers), handle_once for idempotency (a redelivered command must
+not double-charge), and the outbox — the reply is staged in the same transaction
+as the charge, so "charged but reply lost" can't happen.
 """
 
 import os
 import pathlib
 import socket
 import threading
-from datetime import datetime, timezone
 
 from pyevents import (
     connect,
@@ -54,8 +42,8 @@ from pyevents import (
     Message,
 )
 
-QUEUE = "payment.q"
-EXCHANGE = "orders"
+QUEUE = "payment.cmd.q"
+COMMANDS = "commands"
 SCHEMA = (pathlib.Path(__file__).parent / "schema.sql").read_text()
 
 WORKER_ID = os.environ.get("HOSTNAME", socket.gethostname())
@@ -68,7 +56,7 @@ def _on_command(command: dict) -> None:
     if action == "duplicate":
         set_duplicate_mode(bool(command.get("value")))
         return
-    if action == "pause_relay":  # global — every service's outbox relay
+    if action == "pause_relay":
         set_relay_paused(bool(command.get("value")))
         return
     if command.get("target") != "payment":
@@ -78,70 +66,67 @@ def _on_command(command: dict) -> None:
         print(f"[payment-service/{WORKER_ID}] fail -> {_state['fail']}", flush=True)
 
 
+def _reply(cur, order_id: int, routing_key: str, **extra) -> None:
+    eid = f"{routing_key}:{order_id}"
+    stage_event(
+        cur,
+        event_id=eid,
+        routing_key=routing_key,
+        body={"event_id": eid, "order_id": order_id, **extra},
+    )
+
+
 def main() -> None:
     listen_for_commands(_on_command, service="payment")
 
     db = connect_db()
     run_script(db, SCHEMA)
 
-    # Relay: drains payment_db.outbox -> RabbitMQ. Own thread, own connections.
     threading.Thread(
-        target=relay_loop, args=(DB_URL,), kwargs={"exchange": EXCHANGE},
+        target=relay_loop, args=(DB_URL,), kwargs={"exchange": COMMANDS},
         name="outbox-relay", daemon=True,
     ).start()
 
     conn = connect()
     ch = conn.channel()
-    ch.exchange_declare(exchange=EXCHANGE, exchange_type="topic", durable=True)
-    ch.queue_declare(queue=QUEUE, durable=True)
-    ch.queue_bind(queue=QUEUE, exchange=EXCHANGE, routing_key="order.placed")
 
     def handler(msg: Message) -> None:
         order_id = msg.body["order_id"]
-        amount = msg.body["total_cents"]
-
-        if _state["fail"]:
-            raise RuntimeError(f"payment declined for order {order_id} (simulated)")
+        amount = msg.body.get("amount_cents", 0)
+        cmd = msg.routing_key
 
         with handle_once(db, msg.event_id) as u:
             if not u.first_time:
-                print(
-                    f"[payment-service/{WORKER_ID}] duplicate OrderPlaced for "
-                    f"order {order_id} — skipping",
-                    flush=True,
-                )
                 return
 
-            u.cur.execute(
-                "INSERT INTO payments (order_id, charged_cents) VALUES (%s, %s) "
-                "ON CONFLICT (order_id) DO NOTHING",
-                (order_id, amount),
-            )
-            u.cur.execute(
-                "UPDATE ledger SET total_charged_cents = total_charged_cents + %s "
-                "WHERE id = 1",
-                (amount,),
-            )
-            stage_event(
-                u.cur,
-                event_id=f"pay-{order_id}",
-                routing_key="payment.captured",
-                body={
-                    "event_id": f"pay-{order_id}",
-                    "order_id": order_id,
-                    "amount_cents": amount,
-                    "captured_at": datetime.now(timezone.utc).isoformat(),
-                },
-            )
-            print(
-                f"[payment-service/{WORKER_ID}] charged order {order_id} "
-                f"({amount} cents) + staged PaymentCaptured [attempt {msg.attempt}]",
-                flush=True,
-            )
-        # ONE commit above: processed_events + payments + ledger + outbox row.
-        # No publish() here. The relay thread drains the outbox — and if it's
-        # paused or this process is killed right now, the PaymentCaptured row is
-        # already durably on disk and goes out when the relay next runs.
+            if cmd == "cmd.payment.charge":
+                if _state["fail"]:
+                    _reply(u.cur, order_id, "reply.payment.failed", reason="declined")
+                    print(f"[payment/{WORKER_ID}] order {order_id}: charge FAILED", flush=True)
+                    return
+                u.cur.execute(
+                    "INSERT INTO payments (order_id, charged_cents) VALUES (%s, %s) "
+                    "ON CONFLICT (order_id) DO NOTHING",
+                    (order_id, amount),
+                )
+                u.cur.execute(
+                    "UPDATE ledger SET total_charged_cents = total_charged_cents + %s "
+                    "WHERE id = 1",
+                    (amount,),
+                )
+                _reply(u.cur, order_id, "reply.payment.charged", amount_cents=amount)
+                print(f"[payment/{WORKER_ID}] order {order_id}: charged {amount}c", flush=True)
+
+            elif cmd == "cmd.payment.refund":
+                # compensation — undo the charge
+                u.cur.execute("DELETE FROM payments WHERE order_id = %s", (order_id,))
+                u.cur.execute(
+                    "UPDATE ledger SET total_charged_cents = total_charged_cents - %s "
+                    "WHERE id = 1",
+                    (amount,),
+                )
+                _reply(u.cur, order_id, "reply.payment.refunded", amount_cents=amount)
+                print(f"[payment/{WORKER_ID}] order {order_id}: refunded {amount}c", flush=True)
 
     consume(ch, queue=QUEUE, handler=handler)
 

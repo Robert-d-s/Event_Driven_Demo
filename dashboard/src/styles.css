@@ -334,3 +334,36 @@ button:disabled {
 .scenarios button:not(:disabled):hover {
   border-color: var(--accent);
 }
+
+/* --- stage 5: saga panel --- */
+.saga-states {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.saga-chip {
+  font-size: 11px;
+  padding: 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.saga-log {
+  max-height: 60vh;
+  overflow-y: auto;
+}
+.saga-log li {
+  gap: 8px;
+  font-size: 12px;
+}
+.saga-kind {
+  width: 62px;
+  color: var(--muted);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+.saga-log li.saga-command .saga-kind { color: var(--accent); }
+.saga-log li.saga-reply .saga-kind { color: var(--ok); }
+.saga-log li.saga-timeout .saga-kind { color: var(--bad); }
+.saga-log li.saga-state .saga-detail { color: var(--text); font-weight: 500; }
+.saga-detail { color: var(--muted); }

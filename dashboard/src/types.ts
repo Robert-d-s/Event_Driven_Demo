@@ -17,27 +17,13 @@ export interface QueueStat {
   consumers: number;
 }
 
-// Order lifecycle, derived on the client from the event stream. order-service
-// owns the real status; this is just what the dashboard can infer from what it
-// has seen fly past.
-export type OrderStatus =
-  | "PENDING"
-  | "PAID"
-  | "RESERVED"
-  | "SHIPPED"
-  | "UNKNOWN";
-
-export interface OrderView {
-  order_id: number;
-  status: OrderStatus;
-  lastSeen: string;
-}
-
-// Cross-service consistency snapshot from observer /stats (stage 3 + 4).
+// Cross-service consistency snapshot from observer /stats (stage 3 + 4 + 5).
 export interface Stats {
   orders: number;
   orders_total_cents: number;
   shipped: number;
+  cancelled: number;
+  shipped_total_cents: number;
   payment_rows: number;
   payment_total_cents: number;
   reservations: number;

@@ -127,6 +127,28 @@ services:
       DB_URL: postgresql://demo:demo@postgres:5432/shipping_db
       FAIL_SHIPPING: "false" # stages 2 & 5 flip this
 
+  # Stage 5: owns each order's saga (state machine) — sends commands, waits for
+  # replies, runs compensation in reverse on failure, times out silent steps.
+  orchestrator:
+    build:
+      context: .
+      dockerfile: services/Dockerfile.python
+      args:
+        SERVICE: orchestrator
+    depends_on:
+      topology:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    environment:
+      BROKER_URL: amqp://guest:guest@rabbitmq:5672/%2F
+      DB_URL: postgresql://demo:demo@postgres:5432/orchestrator_db
+      # Generous on purpose: a step only "times out" when a service is genuinely
+      # silent, not merely slow under load. Too tight and a duplicate storm makes
+      # the watchdog compensate orders that were about to succeed — a real lesson
+      # in timeout tuning, but not what this stage is demonstrating.
+      STEP_TIMEOUT_S: "30"
+
   notification-service:
     build:
       context: .

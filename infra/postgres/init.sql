@@ -9,3 +9,4 @@ CREATE DATABASE order_db;
 CREATE DATABASE payment_db;
 CREATE DATABASE inventory_db;
 CREATE DATABASE shipping_db;
+CREATE DATABASE orchestrator_db;  -- stage 5: the saga state machine + audit log

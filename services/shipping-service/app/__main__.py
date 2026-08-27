@@ -1,28 +1,19 @@
 """
-shipping-service — consumer only.
+shipping-service — command handler (Stage 5).
 
-Listens for StockReserved, dispatches the order, emits OrderShipped.
-OrderShipped is what order-service listens for to close the loop.
+  cmd.shipping.dispatch  → dispatch, then  reply.shipping.dispatched
+                                       (or reply.shipping.failed)
 
---- Stage 2 -------------------------------------------------------------------
+Shipping has no compensation — it's the last forward step. If it fails, the
+orchestrator undoes everything *before* it (release stock, refund payment).
 
-`fail` toggle → 3 retries then shipping.q.dlq. (Stage 5 reuses this for
-compensation.)
-
---- Stage 3: idempotency ----------------------------------------------------
-
-Guarded shipment — a double-processed StockReserved is a no-op.
-
---- Stage 4: the outbox ---------------------------------------------------
-
-OrderShipped is written to the `outbox` table in the same transaction as the
-shipment insert. One COMMIT; a relay thread drains it. No publish() call.
+`fail` toggle (Stage 2) is how the demo triggers the interesting case: an order
+that's already been charged and reserved, that now can't ship.
 """
 
 import os
 import pathlib
 import threading
-from datetime import datetime, timezone
 
 from pyevents import (
     connect,
@@ -39,8 +30,8 @@ from pyevents import (
     Message,
 )
 
-QUEUE = "shipping.q"
-EXCHANGE = "orders"
+QUEUE = "shipping.cmd.q"
+COMMANDS = "commands"
 SCHEMA = (pathlib.Path(__file__).parent / "schema.sql").read_text()
 
 _state = {"fail": os.environ.get("FAIL_SHIPPING", "false").lower() == "true"}
@@ -58,7 +49,17 @@ def _on_command(command: dict) -> None:
         return
     if action == "fail":
         _state["fail"] = bool(command.get("value"))
-        print(f"[shipping-service] fail -> {_state['fail']}", flush=True)
+        print(f"[shipping] fail -> {_state['fail']}", flush=True)
+
+
+def _reply(cur, order_id: int, routing_key: str, **extra) -> None:
+    eid = f"{routing_key}:{order_id}"
+    stage_event(
+        cur,
+        event_id=eid,
+        routing_key=routing_key,
+        body={"event_id": eid, "order_id": order_id, **extra},
+    )
 
 
 def main() -> None:
@@ -68,30 +69,26 @@ def main() -> None:
     run_script(db, SCHEMA)
 
     threading.Thread(
-        target=relay_loop, args=(DB_URL,), kwargs={"exchange": EXCHANGE},
+        target=relay_loop, args=(DB_URL,), kwargs={"exchange": COMMANDS},
         name="outbox-relay", daemon=True,
     ).start()
 
     conn = connect()
     ch = conn.channel()
-    ch.exchange_declare(exchange=EXCHANGE, exchange_type="topic", durable=True)
-    ch.queue_declare(queue=QUEUE, durable=True)
-    ch.queue_bind(queue=QUEUE, exchange=EXCHANGE, routing_key="stock.reserved")
 
     def handler(msg: Message) -> None:
         order_id = msg.body["order_id"]
+        if msg.routing_key != "cmd.shipping.dispatch":
+            return
         tracking = f"TRK-{order_id}"
-
-        if _state["fail"]:
-            raise RuntimeError(f"no courier available for order {order_id} (simulated)")
 
         with handle_once(db, msg.event_id) as u:
             if not u.first_time:
-                print(
-                    f"[shipping-service] duplicate StockReserved for order "
-                    f"{order_id} — not shipping again",
-                    flush=True,
-                )
+                return
+
+            if _state["fail"]:
+                _reply(u.cur, order_id, "reply.shipping.failed", reason="no courier")
+                print(f"[shipping] order {order_id}: dispatch FAILED", flush=True)
                 return
 
             u.cur.execute(
@@ -99,22 +96,8 @@ def main() -> None:
                 "ON CONFLICT (order_id) DO NOTHING",
                 (order_id, tracking),
             )
-            stage_event(
-                u.cur,
-                event_id=f"ship-{order_id}",
-                routing_key="order.shipped",
-                body={
-                    "event_id": f"ship-{order_id}",
-                    "order_id": order_id,
-                    "tracking_code": tracking,
-                    "shipped_at": datetime.now(timezone.utc).isoformat(),
-                },
-            )
-            print(
-                f"[shipping-service] dispatched order {order_id} ({tracking}) "
-                f"+ staged OrderShipped [attempt {msg.attempt}]",
-                flush=True,
-            )
+            _reply(u.cur, order_id, "reply.shipping.dispatched", tracking_code=tracking)
+            print(f"[shipping] order {order_id}: dispatched ({tracking})", flush=True)
 
     consume(ch, queue=QUEUE, handler=handler)
 

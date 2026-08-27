@@ -1,30 +1,19 @@
 """
-inventory-service — consumer only.
+inventory-service — command handler (Stage 5).
 
-Listens for PaymentCaptured, reserves stock, emits StockReserved.
-Single replica, its own queue (inventory.q).
+  cmd.inventory.reserve  → reserve stock, then  reply.inventory.reserved
+                                            (or reply.inventory.failed if OOS)
+  cmd.inventory.release   → put the stock back, then  reply.inventory.released  (compensation)
 
---- Stage 2 -------------------------------------------------------------------
-
-Toggles: `slow_ms` (backpressure demo) and `fail` (retry/DLQ demo).
-
---- Stage 3: idempotency ----------------------------------------------------
-
-Guarded stock decrement — a double-processed PaymentCaptured is a no-op.
-
---- Stage 4: the outbox ---------------------------------------------------
-
-StockReserved is now written to the `outbox` table inside the same transaction
-as the stock decrement (`handle_once` yields the cursor). One COMMIT:
-processed_events + stock + reservations + outbox row. A relay thread drains the
-outbox. No publish() call, no re-publish-on-duplicate hack.
+Toggles from Stage 2 still work: `fail` (→ reply.inventory.failed) and `slow_ms`
+(delay before processing, for the timeout demo — a slow-enough inventory makes
+the orchestrator's watchdog fire).
 """
 
 import os
 import pathlib
 import threading
 import time
-from datetime import datetime, timezone
 
 from pyevents import (
     connect,
@@ -41,8 +30,8 @@ from pyevents import (
     Message,
 )
 
-QUEUE = "inventory.q"
-EXCHANGE = "orders"
+QUEUE = "inventory.cmd.q"
+COMMANDS = "commands"
 SCHEMA = (pathlib.Path(__file__).parent / "schema.sql").read_text()
 
 _state = {
@@ -63,10 +52,20 @@ def _on_command(command: dict) -> None:
         return
     if action == "slow_ms":
         _state["slow_ms"] = int(command.get("value") or 0)
-        print(f"[inventory-service] slow_ms -> {_state['slow_ms']}", flush=True)
+        print(f"[inventory] slow_ms -> {_state['slow_ms']}", flush=True)
     elif action == "fail":
         _state["fail"] = bool(command.get("value"))
-        print(f"[inventory-service] fail -> {_state['fail']}", flush=True)
+        print(f"[inventory] fail -> {_state['fail']}", flush=True)
+
+
+def _reply(cur, order_id: int, routing_key: str, **extra) -> None:
+    eid = f"{routing_key}:{order_id}"
+    stage_event(
+        cur,
+        event_id=eid,
+        routing_key=routing_key,
+        body={"event_id": eid, "order_id": order_id, **extra},
+    )
 
 
 def main() -> None:
@@ -76,58 +75,54 @@ def main() -> None:
     run_script(db, SCHEMA)
 
     threading.Thread(
-        target=relay_loop, args=(DB_URL,), kwargs={"exchange": EXCHANGE},
+        target=relay_loop, args=(DB_URL,), kwargs={"exchange": COMMANDS},
         name="outbox-relay", daemon=True,
     ).start()
 
     conn = connect()
     ch = conn.channel()
-    ch.exchange_declare(exchange=EXCHANGE, exchange_type="topic", durable=True)
-    ch.queue_declare(queue=QUEUE, durable=True)
-    ch.queue_bind(queue=QUEUE, exchange=EXCHANGE, routing_key="payment.captured")
 
     def handler(msg: Message) -> None:
         order_id = msg.body["order_id"]
+        cmd = msg.routing_key
         sku, qty = "WIDGET-1", 1
 
         if _state["slow_ms"]:
             time.sleep(_state["slow_ms"] / 1000)
 
-        if _state["fail"]:
-            raise RuntimeError(f"stock system unavailable for order {order_id} (simulated)")
-
         with handle_once(db, msg.event_id) as u:
             if not u.first_time:
-                print(
-                    f"[inventory-service] duplicate PaymentCaptured for order "
-                    f"{order_id} — not reserving again",
-                    flush=True,
-                )
                 return
 
-            u.cur.execute(
-                "UPDATE stock SET qty = qty - %s WHERE sku = %s", (qty, sku)
-            )
-            u.cur.execute(
-                "INSERT INTO reservations (order_id, sku, qty) VALUES (%s, %s, %s) "
-                "ON CONFLICT (order_id) DO NOTHING",
-                (order_id, sku, qty),
-            )
-            stage_event(
-                u.cur,
-                event_id=f"stock-{order_id}",
-                routing_key="stock.reserved",
-                body={
-                    "event_id": f"stock-{order_id}",
-                    "order_id": order_id,
-                    "reserved_at": datetime.now(timezone.utc).isoformat(),
-                },
-            )
-            print(
-                f"[inventory-service] reserved {qty}x {sku} for order {order_id} "
-                f"+ staged StockReserved [attempt {msg.attempt}]",
-                flush=True,
-            )
+            if cmd == "cmd.inventory.reserve":
+                if _state["fail"]:
+                    _reply(u.cur, order_id, "reply.inventory.failed", reason="out of stock")
+                    print(f"[inventory] order {order_id}: reserve FAILED", flush=True)
+                    return
+                u.cur.execute(
+                    "UPDATE stock SET qty = qty - %s WHERE sku = %s", (qty, sku)
+                )
+                u.cur.execute(
+                    "INSERT INTO reservations (order_id, sku, qty) VALUES (%s, %s, %s) "
+                    "ON CONFLICT (order_id) DO NOTHING",
+                    (order_id, sku, qty),
+                )
+                _reply(u.cur, order_id, "reply.inventory.reserved")
+                print(f"[inventory] order {order_id}: reserved {qty}x {sku}", flush=True)
+
+            elif cmd == "cmd.inventory.release":
+                # compensation — put the stock back
+                u.cur.execute(
+                    "DELETE FROM reservations WHERE order_id = %s RETURNING qty",
+                    (order_id,),
+                )
+                row = u.cur.fetchone()
+                released = row[0] if row else qty
+                u.cur.execute(
+                    "UPDATE stock SET qty = qty + %s WHERE sku = %s", (released, sku)
+                )
+                _reply(u.cur, order_id, "reply.inventory.released", qty=released)
+                print(f"[inventory] order {order_id}: released {released}x {sku}", flush=True)
 
     consume(ch, queue=QUEUE, handler=handler)
 

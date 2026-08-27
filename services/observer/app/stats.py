@@ -27,6 +27,7 @@ DSNS = {
     "inventory": f"postgresql://demo:demo@{_PG}:5432/inventory_db",
     "shipping": f"postgresql://demo:demo@{_PG}:5432/shipping_db",
 }
+_ORCH_DSN = f"postgresql://demo:demo@{_PG}:5432/orchestrator_db"
 
 
 def _one(dsn: str, sql: LiteralString) -> tuple | None:
@@ -39,11 +40,44 @@ def _one(dsn: str, sql: LiteralString) -> tuple | None:
         return None
 
 
+def _all(dsn: str, sql: LiteralString) -> list[tuple]:
+    try:
+        with psycopg.connect(dsn, connect_timeout=3) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                return cur.fetchall()
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def saga_snapshot() -> dict:
+    """Stage 5: the orchestrator's view — per-order state + the audit log."""
+    states = _all(
+        _ORCH_DSN,
+        "SELECT state, count(*) FROM sagas GROUP BY state ORDER BY state",
+    )
+    recent = _all(
+        _ORCH_DSN,
+        "SELECT order_id, at, kind, detail FROM saga_log "
+        "ORDER BY id DESC LIMIT 60",
+    )
+    return {
+        "by_state": {s: int(c) for s, c in states},
+        "log": [
+            {"order_id": o, "at": a.isoformat(), "kind": k, "detail": d}
+            for o, a, k, d in recent
+        ],
+    }
+
+
 def snapshot() -> dict:
     orders = _one(
         DSNS["order"],
         "SELECT count(*), coalesce(sum(total_cents),0), "
-        "count(*) FILTER (WHERE status='SHIPPED') FROM orders",
+        "count(*) FILTER (WHERE status='SHIPPED'), "
+        "count(*) FILTER (WHERE status='CANCELLED'), "
+        "coalesce(sum(total_cents) FILTER (WHERE status='SHIPPED'), 0) "
+        "FROM orders",
     )
     payment = _one(
         DSNS["payment"],
@@ -72,6 +106,8 @@ def snapshot() -> dict:
     order_count = int(orders[0]) if orders else 0
     order_total = int(orders[1]) if orders else 0
     shipped = int(orders[2]) if orders else 0
+    cancelled = int(orders[3]) if orders else 0
+    shipped_total = int(orders[4]) if orders else 0
     pay_rows = int(payment[0]) if payment else 0
     pay_total = int(payment[1]) if payment and payment[1] is not None else 0
     resv = int(inventory[0]) if inventory else 0
@@ -82,6 +118,8 @@ def snapshot() -> dict:
         "orders": order_count,
         "orders_total_cents": order_total,
         "shipped": shipped,
+        "cancelled": cancelled,
+        "shipped_total_cents": shipped_total,
         "payment_rows": pay_rows,
         "payment_total_cents": pay_total,
         "reservations": resv,
@@ -89,9 +127,12 @@ def snapshot() -> dict:
         "shipments": ship_rows,
         "processed_events": dupes,
         "outbox_pending": outbox_pending,
-        # the two headline checks
+        # Stage 5: a CANCELLED order legitimately has NO payment / reservation /
+        # shipment — the compensation removed them. So the invariant is now:
+        # the footprint of COMPLETED (SHIPPED) orders lines up, and CANCELLED
+        # orders leave nothing behind.
         "consistent": (
-            order_total == pay_total
-            and order_count == pay_rows == resv == ship_rows
+            shipped == pay_rows == resv == ship_rows
+            and shipped_total == pay_total
         ),
     }

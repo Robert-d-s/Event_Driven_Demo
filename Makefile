@@ -3,7 +3,7 @@
 # Stage 0-1 targets. Later stages add demo-stage-2 … demo-stage-5.
 
 .PHONY: help up down logs ps rebuild topology dashboard broker \
-        demo-stage-0 demo-stage-1 demo-stage-2 demo-stage-3 demo-stage-4 \
+        demo-stage-0 demo-stage-1 demo-stage-2 demo-stage-3 demo-stage-4 demo-stage-5 \
         chaos-poison chaos-kill-payment
 
 help: ## show this help
@@ -108,6 +108,24 @@ demo-stage-4: ## stage 4 — pause the relays, kill a service, watch the outbox 
 	@curl -s localhost:8001/stats | python3 -c "import sys,json; d=json.load(sys.stdin); print(f\"     orders={d['orders']} shipments={d['shipments']} consistent={d['consistent']} outbox_pending={d['outbox_pending']}\")"
 	@echo "  All 5 orders completed. The events were durably on disk the whole time —"
 	@echo "  the relay picked up where it left off after the crash."
+
+demo-stage-5: ## stage 5 — fail shipping on a charged+reserved order; watch it compensate
+	@echo "STAGE 5: the orchestrator + compensation."
+	@echo "  1. turning ON 'fail shipping'"
+	curl -s -XPOST localhost:8001/control -H 'content-type: application/json' \
+	  -d '{"target":"shipping","action":"fail","value":true}' >/dev/null
+	@echo "  2. placing 1 order — orchestrator runs charge -> reserve -> dispatch"
+	./scripts/place_orders.sh 1
+	@sleep 9
+	@echo ""
+	@echo "  Saga audit log (oldest first):"
+	@curl -s localhost:8001/saga | python3 -c "import sys,json; d=json.load(sys.stdin); print('  states:', d['by_state']); [print(f\"    {e['kind']:8} {e['detail']}\") for e in reversed(d['log'])]"
+	@echo ""
+	@echo "  dispatch failed -> COMPENSATING -> release stock + refund (in reverse) -> CANCELLED."
+	@curl -s localhost:8001/stats | python3 -c "import sys,json; d=json.load(sys.stdin); print(f\"  payments={d['payment_rows']} reservations={d['reservations']} shipments={d['shipments']} cancelled={d['cancelled']} consistent={d['consistent']}\")"
+	@echo "  A CANCELLED order leaves NO footprint — the compensation undid everything."
+	curl -s -XPOST localhost:8001/control -H 'content-type: application/json' \
+	  -d '{"target":"shipping","action":"fail","value":false}' >/dev/null
 
 chaos-poison: ## send an unparseable message — goes straight to DLQ, no retries
 	./scripts/poison.sh

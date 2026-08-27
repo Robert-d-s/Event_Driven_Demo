@@ -18,6 +18,7 @@ make demo-stage-1    # place 20 orders and watch them flow
 make demo-stage-2    # fail payments; watch retries then dead-letter queue
 make demo-stage-3    # duplicate every event; watch consistency hold
 make demo-stage-4    # pause outbox relays, kill a service, watch events survive
+make demo-stage-5    # fail shipping on a charged order; watch it compensate
 make down            # stop, wipe broker + db
 ```
 
@@ -36,16 +37,16 @@ independently; `main` always holds the latest.
 | `stage-2` | acks, retries, backoff, dead-letter queues, failure toggles |
 | `stage-3` | duplicate-safe (idempotent) consumers + per-service Postgres |
 | `stage-4` | transactional outbox — events written with the work, a relay publishes |
-| `stage-5` | workflows + compensation *(coming)* |
+| `stage-5` | orchestration — a saga owns the workflow, compensates on failure |
 
 ```bash
-git checkout stage-4 && make down && make up   # switch stages
+git checkout stage-5 && make down && make up   # switch stages
 ```
 
 Queue definitions and DB schemas differ between stages, so always `make down`
 before switching branches.
 
-**You are on: `stage-4`.**
+**You are on: `stage-5`.**
 
 ## The system
 
@@ -76,11 +77,11 @@ keep the events an honest language-neutral contract (see [contracts/](contracts/
 | 2 | Acks, retries, backoff, dead-letter queues | [docs/stage-2.md](docs/stage-2.md) | ✅ built |
 | 3 | Duplicate-safe (idempotent) consumers | [docs/stage-3.md](docs/stage-3.md) | ✅ built |
 | 4 | The transactional outbox | [docs/stage-4.md](docs/stage-4.md) | ✅ built |
-| 5 | Workflows + compensation (undoing a multi-step process) | on branch `stage-5` | ⏳ next |
+| 5 | Orchestration — a saga owns the workflow, compensates on failure | [docs/stage-5.md](docs/stage-5.md) | ✅ built |
 
-Explicitly **not** in scope: Kafka, event sourcing, CQRS, schema registries,
-Kubernetes, distributed tracing. All real, none useful before stages 0–5 are
-solid.
+That's the series. Not covered — Kafka, event sourcing, CQRS, schema registries,
+distributed tracing, Kubernetes. All real, all build on the above, none a
+prerequisite for using this architecture well.
 
 ## Layout
 
@@ -93,12 +94,13 @@ infra/
   postgres/init.sql     one database per service
 libs/pyevents/          shared TRANSPORT only (connect / publish / consume)
 services/
-  order-service/        Python — FastAPI + pika consumer thread
-  payment-service/      Python — pika consumer, runs 3 replicas
-  inventory-service/    Python — pika consumer
-  shipping-service/     Python — pika consumer
+  order-service/        Python — FastAPI; POST /orders → order row + outbox
+  orchestrator/         Python — owns each order's saga (stage 5)
+  payment-service/      Python — command handler, runs 3 replicas
+  inventory-service/    Python — command handler
+  shipping-service/     Python — command handler
   notification-service/ TypeScript — amqplib
-  observer/             Python — binds "#", WebSocket feed to the dashboard
+  observer/             Python — binds "#", WebSocket + /stats + /saga to the dashboard
 dashboard/              Vite + React + TypeScript
 scripts/                place_orders.sh — used by the demo targets
 ```

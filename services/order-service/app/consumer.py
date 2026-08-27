@@ -1,14 +1,16 @@
 """
 order-service's consumer thread.
 
-Listens for OrderShipped and marks the order SHIPPED in Postgres. That's the only
-event order-service consumes — it's mostly a producer.
+Listens for the orchestrator's TERMINAL events and updates the order's status:
+  order.shipped   -> SHIPPED
+  order.cancelled -> CANCELLED
 
-Runs on its OWN pika connection and its OWN psycopg connection (both created here,
-inside the thread) so nothing is shared with the HTTP side.
+order-service still owns the order row and stages `order.placed` (see api.py);
+the orchestrator owns everything in between. These two events are how the
+workflow's outcome gets back to the order.
 
-Also hosts order-service's control-channel listener, for the global "duplicate
-everything" toggle — order-service's Publisher needs to honour it too.
+Runs on its OWN pika + psycopg connections (created here, inside the thread).
+Also hosts order-service's control-channel listener for the global toggles.
 """
 
 import pathlib
@@ -48,24 +50,24 @@ def run_consumer() -> None:
 
     # order.q (+ its .retry / .dlq) is declared by infra/topology.py before this
     # service starts.
+    _STATUS = {"order.shipped": "SHIPPED", "order.cancelled": "CANCELLED"}
+
     def handler(msg: Message) -> None:
-        if msg.routing_key != "order.shipped":
+        status = _STATUS.get(msg.routing_key)
+        if status is None:
             return
         order_id = msg.body["order_id"]
         with process_once(db, msg.event_id) as first_time:
             if not first_time:
-                print(
-                    f"[order-service] duplicate OrderShipped for order {order_id} "
-                    f"(event_id={msg.event_id}) — ignoring",
-                    flush=True,
-                )
                 return
             with db.cursor() as cur:
                 cur.execute(
-                    "UPDATE orders SET status = 'SHIPPED', updated_at = now() "
+                    "UPDATE orders SET status = %s, updated_at = now() "
                     "WHERE order_id = %s",
-                    (order_id,),
+                    (status, order_id),
                 )
-            print(f"[order-service] order {order_id} -> SHIPPED", flush=True)
+            reason = msg.body.get("reason")
+            extra = f" ({reason})" if reason else ""
+            print(f"[order-service] order {order_id} -> {status}{extra}", flush=True)
 
     consume(ch, queue=QUEUE, handler=handler)

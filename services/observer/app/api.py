@@ -70,8 +70,16 @@ def stats() -> dict:
     return snapshot()
 
 
+@app.get("/saga")
+def saga() -> dict:
+    """Stage 5: the orchestrator's per-order state + audit log."""
+    from .stats import saga_snapshot
+
+    return saga_snapshot()
+
+
 class KillRequest(BaseModel):
-    service: str  # e.g. "order-service", "payment-service", "inventory-service"
+    service: str  # e.g. "order-service", "payment-service", "orchestrator"
 
 
 # Only these can be targeted, so a stray request can't take down the broker/db.
@@ -80,6 +88,7 @@ _KILLABLE = {
     "payment-service",
     "inventory-service",
     "shipping-service",
+    "orchestrator",
 }
 
 

@@ -1,46 +1,10 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { useEventStream } from "./useEventStream";
 import { useQueues } from "./useQueues";
 import { useStats } from "./useStats";
-import type { BusEvent, OrderStatus, OrderView } from "./types";
+import { useSaga } from "./useSaga";
 
 const money = (cents: number) => `$${(cents / 100).toFixed(2)}`;
-
-const STATUS_FROM_KEY: Record<string, OrderStatus> = {
-  "order.placed": "PENDING",
-  "payment.captured": "PAID",
-  "stock.reserved": "RESERVED",
-  "order.shipped": "SHIPPED",
-};
-
-const STATUS_ORDER: OrderStatus[] = [
-  "PENDING",
-  "PAID",
-  "RESERVED",
-  "SHIPPED",
-];
-
-// Fold the event stream into a per-order view. Only advances status forward.
-function deriveOrders(events: BusEvent[]): OrderView[] {
-  const map = new Map<number, OrderView>();
-  // events are newest-first; walk oldest-first so status advances naturally
-  for (const ev of [...events].reverse()) {
-    if (ev.order_id == null) continue;
-    const next = STATUS_FROM_KEY[ev.routing_key];
-    if (!next) continue;
-    const cur = map.get(ev.order_id);
-    const curRank = cur ? STATUS_ORDER.indexOf(cur.status) : -1;
-    const nextRank = STATUS_ORDER.indexOf(next);
-    if (!cur || nextRank > curRank) {
-      map.set(ev.order_id, {
-        order_id: ev.order_id,
-        status: next,
-        lastSeen: ev.seen_at,
-      });
-    }
-  }
-  return [...map.values()].sort((a, b) => b.order_id - a.order_id);
-}
 
 function timeOnly(iso: string): string {
   return new Date(iso).toLocaleTimeString([], { hour12: false });
@@ -54,11 +18,21 @@ type Toggles = {
   pauseRelay: boolean;
 };
 
+const SAGA_STATE_COLOR: Record<string, string> = {
+  STARTED: "var(--accent)",
+  CHARGED: "var(--accent)",
+  RESERVED: "var(--accent)",
+  COMPLETED: "var(--ok)",
+  COMPENSATING: "var(--warn)",
+  CANCELLING: "var(--warn)",
+  CANCELLED: "var(--bad)",
+};
+
 export function App() {
   const { events, connected } = useEventStream();
   const queues = useQueues();
   const stats = useStats();
-  const orders = useMemo(() => deriveOrders(events), [events]);
+  const saga = useSaga();
   const [busy, setBusy] = useState(false);
   const [toggles, setToggles] = useState<Toggles>({
     paymentFail: false,
@@ -135,16 +109,31 @@ export function App() {
     }
   }
 
-  async function runDlqScenario() {
-    setScenario("dlq");
+  async function runCompensationScenario() {
+    setScenario("compensation");
     try {
-      await sendControl("payment", "fail", true);
-      setToggles((t) => ({ ...t, paymentFail: true }));
+      await sendControl("shipping", "fail", true);
+      setToggles((t) => ({ ...t, shippingFail: true }));
       await sleep(500);
-      await placeOrders(3);
-      await sleep(18000); // 3 attempts × 5s + slack
-      await sendControl("payment", "fail", false);
-      setToggles((t) => ({ ...t, paymentFail: false }));
+      await placeOrders(1);
+      // charge → reserve → dispatch fails → release + refund → CANCELLED
+      await sleep(8000);
+      await sendControl("shipping", "fail", false);
+      setToggles((t) => ({ ...t, shippingFail: false }));
+    } finally {
+      setScenario(null);
+    }
+  }
+
+  async function runTimeoutScenario() {
+    setScenario("timeout");
+    try {
+      await sendControl("inventory", "slow_ms", 90000); // effectively silent
+      await sleep(500);
+      await placeOrders(1);
+      // charge ok, reserve never answers → 30s watchdog → refund → CANCELLED
+      await sleep(40000);
+      await sendControl("inventory", "slow_ms", 0);
     } finally {
       setScenario(null);
     }
@@ -157,7 +146,7 @@ export function App() {
       setToggles((t) => ({ ...t, duplicate: true }));
       await sleep(500);
       await placeOrders(10);
-      await sleep(6000);
+      await sleep(8000);
       await sendControl("all", "duplicate", false);
       setToggles((t) => ({ ...t, duplicate: false }));
     } finally {
@@ -257,12 +246,19 @@ export function App() {
         <span className="scen-label">Scenarios (no terminal):</span>
         <button
           disabled={scenario !== null || busy}
-          onClick={runDuplicateScenario}
+          onClick={runCompensationScenario}
         >
-          {scenario === "duplicate" ? "running…" : "▶ Stage 3 — duplicate storm"}
+          {scenario === "compensation"
+            ? "running…"
+            : "▶ Stage 5 — shipping fails → compensate"}
         </button>
-        <button disabled={scenario !== null || busy} onClick={runDlqScenario}>
-          {scenario === "dlq" ? "running…" : "▶ Stage 2 — retries → DLQ"}
+        <button
+          disabled={scenario !== null || busy}
+          onClick={runTimeoutScenario}
+        >
+          {scenario === "timeout"
+            ? "running…"
+            : "▶ Stage 5 — silent inventory → timeout"}
         </button>
         <button
           disabled={scenario !== null || busy}
@@ -272,20 +268,30 @@ export function App() {
             ? "running…"
             : "▶ Stage 4 — pause relays, kill order-service"}
         </button>
+        <button
+          disabled={scenario !== null || busy}
+          onClick={runDuplicateScenario}
+        >
+          {scenario === "duplicate" ? "running…" : "▶ Stage 3 — duplicate storm"}
+        </button>
         <span className="sep" />
         <span className="scen-label">Kill (SIGKILL + restart):</span>
-        {["order-service", "payment-service", "inventory-service", "shipping-service"].map(
-          (s) => (
-            <button
-              key={s}
-              className="toggle"
-              disabled={scenario !== null}
-              onClick={() => killService(s)}
-            >
-              ✗ {s.replace("-service", "")}
-            </button>
-          ),
-        )}
+        {[
+          "orchestrator",
+          "order-service",
+          "payment-service",
+          "inventory-service",
+          "shipping-service",
+        ].map((s) => (
+          <button
+            key={s}
+            className="toggle"
+            disabled={scenario !== null}
+            onClick={() => killService(s)}
+          >
+            ✗ {s.replace("-service", "")}
+          </button>
+        ))}
       </div>
 
       <div className="grid">
@@ -312,30 +318,39 @@ export function App() {
           </ul>
         </section>
 
-        <section className="panel orders">
-          <h2>Orders</h2>
-          <ul>
-            {orders.map((o) => (
-              <li key={o.order_id}>
-                <span className="oid">#{o.order_id}</span>
-                <span className="track">
-                  {STATUS_ORDER.map((s) => (
-                    <i
-                      key={s}
-                      className={
-                        STATUS_ORDER.indexOf(s) <=
-                        STATUS_ORDER.indexOf(o.status)
-                          ? "on"
-                          : "off"
-                      }
-                    />
-                  ))}
+        <section className="panel saga">
+          <h2>Saga — the orchestrator's audit log</h2>
+          {saga && (
+            <div className="saga-states">
+              {Object.entries(saga.by_state).map(([s, n]) => (
+                <span
+                  key={s}
+                  className="saga-chip"
+                  style={{ borderColor: SAGA_STATE_COLOR[s] ?? "var(--border)" }}
+                >
+                  {s} {n}
                 </span>
-                <span className="status">{o.status}</span>
+              ))}
+            </div>
+          )}
+          <ul className="saga-log">
+            {saga?.log.map((e, i) => (
+              <li key={i} className={`saga-${e.kind}`}>
+                <span className="oid">#{e.order_id}</span>
+                <span className="saga-kind">{e.kind}</span>
+                <span className="saga-detail">{e.detail}</span>
               </li>
             ))}
-            {orders.length === 0 && <li className="empty">No orders yet.</li>}
+            {!saga?.log.length && (
+              <li className="empty">
+                No sagas yet. Place an order — the orchestrator drives it.
+              </li>
+            )}
           </ul>
+          <p className="legend">
+            forward: charge → reserve → dispatch. On failure or a{" "}
+            {"30s"} step timeout, compensations run in reverse (release, refund).
+          </p>
         </section>
 
         <section className="panel queues">

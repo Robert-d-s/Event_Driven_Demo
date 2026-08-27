@@ -1,135 +1,137 @@
 """
 Declares the RabbitMQ topology.
 
-STAGE 1 gave us one topic exchange and one queue per consumer.
+--- Stages 1-4: choreography ------------------------------------------------
 
-STAGE 2 adds a retry + dead-letter path for each *consumer* queue.
+One topic exchange "orders". Each service binds a queue to the routing keys it
+cares about and reacts. Nobody is in charge; the workflow is the sum of everyone's
+bindings. Retry + dead-letter path per consumer queue (Stage 2).
 
---- The shape (payment shown; inventory/shipping/order are identical) ----------
+--- Stage 5: orchestration -------------------------------------------------
 
-    orders ──"order.placed"──▶ payment.q
-    (topic)                      │
-                                 │  handler raises
-                                 ▼
-              consume() bumps x-retry-count and publishes to
-                                 │
-                       orders.dlx ──"payment.q.retry"──▶ payment.q.retry
-                       (direct)                            │  x-message-ttl = 5000ms
-                                                           │  (message just sits here)
-                                                           ▼  TTL expires
-                                        dead-lettered via x-dead-letter-exchange
-                                        with x-dead-letter-routing-key = payment.q
-                                                           │
-                       orders.dlx ──"payment.q"────────────┘  ◀── back for another go
+A new "commands" topic exchange and an `orchestrator` service that owns each
+order's state machine. Instead of reacting to whatever the previous service
+emitted, services now receive explicit COMMANDS and send back REPLIES:
 
-    After MAX_ATTEMPTS, consume() publishes to "payment.q.dead" instead:
+    orchestrator ──cmd.payment.charge──▶ payment.cmd.q ──▶ payment-service
+    payment-service ──reply.payment.charged / reply.payment.failed──▶ orchestrator.q
 
-                       orders.dlx ──"payment.q.dead"──▶ payment.q.dlq
-                                                          (no consumer — terminal)
+On a failure partway through (shipping can't dispatch an order already charged
+and reserved), the orchestrator sends COMPENSATING commands in reverse:
 
---- Why this design ----------------------------------------------------------
+    cmd.inventory.release,  cmd.payment.refund
 
-* **A dedicated direct exchange (`orders.dlx`), not the topic `orders`.**
-  If retries went back through `orders` with routing key `order.placed`, every
-  retry would ALSO re-hit notification.q and observer.q — the customer would get
-  "order received!" three times. Routing retries by *queue name* on a direct
-  exchange keeps a retry private to the one consumer that failed.
+`order.placed` still flows on the "orders" exchange — it's the trigger the
+orchestrator listens for. Everything after it is commands + replies.
 
-* **A retry queue with a TTL, not `basic_nack(requeue=True)`.**
-  A requeued message is redelivered immediately. A handler that always fails
-  (downstream down, bad data) then spins in a tight loop. RabbitMQ has no native
-  "redeliver in 5s", so we park the message in a queue with a per-message TTL and
-  let it expire — an expired message is dead-lettered, and we point that back at
-  the work queue.
+Retry/DLQ still applies to the command queues (a command that keeps failing
+dead-letters, and the orchestrator's per-step timeout catches a silent service).
 
-* **Attempt counting via an `x-retry-count` header that consume() manages.**
-  The broker's own `x-death` count doesn't survive a manual re-publish cleanly
-  (each failure re-publishes the message), so consume() owns and increments its
-  own header instead. See libs/pyevents/pyevents/consumer.py.
+--- Between stages --------------------------------------------------------
 
---- Changing this file / moving between stages -------------------------------
-
-Queue arguments (x-message-ttl, x-dead-letter-exchange, …) are fixed when the
-queue is declared. Re-declaring a queue with *different* args fails with
-PRECONDITION_FAILED. So between stages:  `make down`  then  `make up`.
-Re-running topology with unchanged args is still a safe no-op.
+Queue arguments are fixed at declare time, and Stage 5 adds new queues. Always
+`make down` then `make up` when switching stages.
 """
 
 from pyevents import Channel, connect
 
-EXCHANGE = "orders"        # topic — the event bus
+EVENTS = "orders"          # topic — the Stage 1-4 event bus (still carries order.placed)
 DLX = "orders.dlx"         # direct — retry + dead-letter routing, keyed by queue name
+COMMANDS = "commands"      # topic — Stage 5 command + reply bus
 
 RETRY_DELAY_MS = 5000
 MAX_ATTEMPTS = 3
 
-# consumer queue -> binding patterns on the "orders" topic exchange.
-# Each also gets "<queue>.retry" and "<queue>.dlq".
-CONSUMER_QUEUES: dict[str, list[str]] = {
-    "payment.q": ["order.placed"],
-    "inventory.q": ["payment.captured"],
-    "shipping.q": ["stock.reserved"],
-    "order.q": ["order.shipped"],
+# --- Stage 1-4 event consumers (choreography) -----------------------------
+# order.q still matters: order-service marks the order SHIPPED / CANCELLED from
+# the terminal events the orchestrator emits.
+EVENT_QUEUES: dict[str, list[str]] = {
+    "order.q": ["order.shipped", "order.cancelled"],
 }
 
-# Observer queues: no retry. If notification/observer fails on a message,
-# dropping it is fine — nothing downstream depends on them.
 OBSERVER_QUEUES: dict[str, list[str]] = {
-    "notification.q": ["order.placed", "payment.captured", "stock.reserved", "order.shipped"],
-    "observer.q": ["#"],
+    "notification.q": ["order.placed", "order.shipped", "order.cancelled"],
+    "observer.q": ["#"],  # bound to BOTH exchanges below
 }
+
+# --- Stage 5 command queues (orchestration) -------------------------------
+# service queue -> the command routing keys it handles (forward + compensating).
+COMMAND_QUEUES: dict[str, list[str]] = {
+    "payment.cmd.q": ["cmd.payment.charge", "cmd.payment.refund"],
+    "inventory.cmd.q": ["cmd.inventory.reserve", "cmd.inventory.release"],
+    "shipping.cmd.q": ["cmd.shipping.dispatch"],
+}
+
+# The orchestrator's queue: every reply, plus the order.placed trigger.
+ORCH_REPLY_BINDINGS = ["reply.#"]
+ORCH_EVENT_BINDINGS = ["order.placed"]
+
+
+def _declare_with_retry(
+    channel: Channel, queue: str, bindings: list[str], exchange: str
+) -> None:
+    """A work queue plus its retry queue and terminal DLQ (Stage 2 machinery)."""
+    retry_q, dlq = f"{queue}.retry", f"{queue}.dlq"
+
+    channel.queue_declare(queue=queue, durable=True)
+    for rk in bindings:
+        channel.queue_bind(queue=queue, exchange=exchange, routing_key=rk)
+    channel.queue_bind(queue=queue, exchange=DLX, routing_key=queue)
+
+    channel.queue_declare(
+        queue=retry_q,
+        durable=True,
+        arguments={
+            "x-message-ttl": RETRY_DELAY_MS,
+            "x-dead-letter-exchange": DLX,
+            "x-dead-letter-routing-key": queue,
+        },
+    )
+    channel.queue_bind(queue=retry_q, exchange=DLX, routing_key=f"{queue}.retry")
+
+    channel.queue_declare(queue=dlq, durable=True)
+    channel.queue_bind(queue=dlq, exchange=DLX, routing_key=f"{queue}.dead")
+    print(f"  {queue:<18} <- {bindings}", flush=True)
 
 
 def declare(channel: Channel) -> None:
-    channel.exchange_declare(exchange=EXCHANGE, exchange_type="topic", durable=True)
+    channel.exchange_declare(exchange=EVENTS, exchange_type="topic", durable=True)
+    channel.exchange_declare(exchange=COMMANDS, exchange_type="topic", durable=True)
     channel.exchange_declare(exchange=DLX, exchange_type="direct", durable=True)
 
-    for queue, patterns in CONSUMER_QUEUES.items():
-        retry_q = f"{queue}.retry"
-        dlq = f"{queue}.dlq"
+    for queue, bindings in EVENT_QUEUES.items():
+        _declare_with_retry(channel, queue, bindings, EVENTS)
+        # The orchestrator emits order.shipped / order.cancelled through its
+        # outbox relay, which publishes on the COMMANDS exchange. Bind order.q
+        # there too so order-service sees those terminal events.
+        for rk in bindings:
+            channel.queue_bind(queue=queue, exchange=COMMANDS, routing_key=rk)
 
-        # Work queue. Bound to the topic exchange for normal delivery, and to the
-        # DLX under its own name so retried messages come back to it.
-        channel.queue_declare(queue=queue, durable=True)
-        for pattern in patterns:
-            channel.queue_bind(queue=queue, exchange=EXCHANGE, routing_key=pattern)
-        channel.queue_bind(queue=queue, exchange=DLX, routing_key=queue)
+    for queue, bindings in COMMAND_QUEUES.items():
+        _declare_with_retry(channel, queue, bindings, COMMANDS)
 
-        # Retry holding pen. Message waits RETRY_DELAY_MS, expires, and is
-        # dead-lettered via DLX with routing key = <queue>, landing back in the
-        # work queue above.
-        channel.queue_declare(
-            queue=retry_q,
-            durable=True,
-            arguments={
-                "x-message-ttl": RETRY_DELAY_MS,
-                "x-dead-letter-exchange": DLX,
-                "x-dead-letter-routing-key": queue,
-            },
-        )
-        channel.queue_bind(queue=retry_q, exchange=DLX, routing_key=f"{queue}.retry")
-
-        # Terminal dead-letter queue. No consumer, no TTL.
-        channel.queue_declare(queue=dlq, durable=True)
-        channel.queue_bind(queue=dlq, exchange=DLX, routing_key=f"{queue}.dead")
-
-        print(
-            f"  {queue:<12} + {retry_q} (ttl {RETRY_DELAY_MS}ms, "
-            f"max {MAX_ATTEMPTS} attempts) + {dlq}",
-            flush=True,
-        )
+    # orchestrator: replies (on COMMANDS) + the order.placed trigger (on EVENTS).
+    _declare_with_retry(channel, "orchestrator.q", ORCH_REPLY_BINDINGS, COMMANDS)
+    for rk in ORCH_EVENT_BINDINGS:
+        channel.queue_bind(queue="orchestrator.q", exchange=EVENTS, routing_key=rk)
+    print(f"  orchestrator.q     <- {ORCH_EVENT_BINDINGS} (on '{EVENTS}')", flush=True)
 
     for queue, patterns in OBSERVER_QUEUES.items():
         channel.queue_declare(queue=queue, durable=True)
         for pattern in patterns:
-            channel.queue_bind(queue=queue, exchange=EXCHANGE, routing_key=pattern)
-        print(f"  {queue:<12} (observer, no retry)", flush=True)
+            channel.queue_bind(queue=queue, exchange=EVENTS, routing_key=pattern)
+        if queue == "observer.q":
+            channel.queue_bind(queue=queue, exchange=COMMANDS, routing_key="#")
+        print(f"  {queue:<18} (observer/notification, no retry)", flush=True)
 
 
 def main() -> None:
     conn = connect()
     ch = conn.channel()
-    print(f"declaring topology: '{EXCHANGE}' (topic) + '{DLX}' (direct)", flush=True)
+    print(
+        f"declaring topology: '{EVENTS}' + '{COMMANDS}' (topic) + '{DLX}' (direct)",
+        flush=True,
+    )
     declare(ch)
     conn.close()
     print("topology ready", flush=True)
