@@ -134,7 +134,7 @@ only because we remembered to write that hack. Stage 4 removes the hack.
 - [ ] dashboard consistency panel stays green under duplication
 - [ ] kill inventory mid-message → reservations goes up by 1, not 2
 - [ ] `payment_db.ledger.total_charged_cents` equals the sum of order totals
-      exactly (check in psql: `psql postgresql://demo:demo@localhost:55432/payment_db -c 'select * from ledger'`)
+      exactly (check in psql: `psql postgresql://demo:demo@localhost:5432/payment_db -c 'select * from ledger'`)
 
 ## Next
 

@@ -29,8 +29,9 @@ services:
     image: postgres:16
     container_name: postgres-db
     ports:
-      # host 55432 (5432/5433 often taken by other local postgres); containers use 5432
-      - "55432:5432"
+      # If 5432 is taken by a local postgres, change the host side only
+      # (e.g. "5433:5432"); services connect via the internal network on 5432.
+      - "5432:5432"
     environment:
       POSTGRES_USER: demo
       POSTGRES_PASSWORD: demo

@@ -21,7 +21,7 @@ make down            # stop, wipe broker + db
 ```
 
 RabbitMQ management UI: http://localhost:15672 (guest / guest).
-Postgres (for psql poking): `postgresql://demo:demo@localhost:55432/<service>_db`
+Postgres (for psql poking): `postgresql://demo:demo@localhost:5432/<service>_db`
 
 ## Branches — one per stage
 
