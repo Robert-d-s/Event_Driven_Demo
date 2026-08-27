@@ -13,9 +13,16 @@ const ordersTarget = process.env.VITE_PROXY_ORDERS ?? "http://localhost:8000";
 
 export default defineConfig({
   plugins: [react()],
+  // The container mounts ./dashboard as a volume, and switching git branches
+  // rewrites files in bulk. Vite's on-disk transform cache doesn't always
+  // notice, and serves a stale (sometimes truncated) compile. Force a fresh
+  // optimize on every start — trivial cost for a project this size, and it
+  // makes `docker compose restart dashboard` a reliable fix.
+  optimizeDeps: { force: true },
   server: {
     port: 5173,
     host: true,
+    watch: { usePolling: true },
     proxy: {
       "/api/observer": {
         target: observerTarget,
