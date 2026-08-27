@@ -88,23 +88,37 @@ whichever thread gets there creates the tables and the rest are no-ops.
 ```bash
 make up
 make dashboard
-make demo-stage-4
 ```
 
-The demo:
+Then either click **▶ Stage 4 — pause relays, kill order-service** in the
+dashboard's Scenarios row, or run `make demo-stage-4`. Both do the same thing:
 
-1. **Pause every outbox relay** (dashboard: "pause outbox relays"). Events will
-   be staged but not published.
+1. **Pause every outbox relay.** Events get staged but not published.
 2. Place 5 orders. Each `POST /orders` commits an order row + an OrderPlaced
-   outbox row — but nothing flows. The dashboard's consistency panel shows
-   `outbox → order: 5` in amber.
-3. **`SIGKILL order-service`.** Its process dies with 5 events unpublished.
+   outbox row — but nothing flows. The consistency panel shows `outbox → order:
+   5` in amber.
+3. **SIGKILL order-service.** Its process dies with 5 events unpublished.
    *Before the outbox, those 5 OrderPlaced events lived only in the publisher's
    memory — gone. The orders would sit at PENDING forever.*
-4. Un-pause the relays and restart order-service. Its relay reads the 5
+4. Un-pause the relays; order-service restarts. Its relay reads the 5
    still-unpublished rows and drains them. All 5 orders flow through to SHIPPED.
 
-Final: `orders=8 shipments=8 consistent=True outbox_pending all 0`.
+Final: `orders=… shipments=… consistent=True outbox_pending all 0`.
+
+### The relay must survive a broker disconnect
+
+An early version of the relay opened one RabbitMQ connection and assumed it lived
+forever. Pause the relays, flood 20 orders, un-pause: the burst hit a connection
+the broker had closed on missed heartbeats (an idle relay sends none), the
+`relay_loop` thread died with a `StreamLostError`, and ~15 events were stranded
+on disk with nothing to publish them.
+
+The fix ([libs/pyevents/pyevents/outbox.py](../libs/pyevents/pyevents/outbox.py)):
+`_drain_once` runs the whole batch — claim rows, publish, mark published — in one
+transaction, and `relay_loop` catches AMQP errors, rolls the batch back (so no
+row is left half-marked), rebuilds the channel, and retries next tick. Same
+lesson as `Publisher` in Stage 0: any long-lived pika connection that goes idle
+needs reconnect-on-failure.
 
 ### Play with it
 
@@ -128,14 +142,28 @@ Final: `orders=8 shipments=8 consistent=True outbox_pending all 0`.
   long before publishing. Production setups use `LISTEN/NOTIFY` or logical
   decoding to push instead of poll.
 
+## The dashboard is now self-contained
+
+Every scenario runs from the UI — no terminal, no curl:
+
+- **Scenarios row**: one-click runners for the Stage 2 / 3 / 4 demos (they
+  toggle controls, place orders, kill services, and clean up on a timer).
+- **Kill buttons**: SIGKILL + restart any of the four business services.
+  observer does this over the Docker socket (mounted in docker-compose.yml);
+  only `order/payment/inventory/shipping-service` are targetable.
+
+The `make demo-*` targets and curl commands still work and do exactly the same
+thing — the buttons just call the same observer endpoints.
+
 ## Checklist — stage 4 is working when
 
 - [ ] normal flow: `outbox_pending` is 0 within a second of placing orders
-- [ ] `make demo-stage-4` → 5 rows pile up in `order_db.outbox`, survive a
-      SIGKILL, and drain on restart; final state consistent
-- [ ] no `publish(` call left in any service handler (`grep -rn 'publish(' services/`)
+- [ ] the "▶ Stage 4" button (or `make demo-stage-4`) → 5 rows pile up in
+      `order_db.outbox`, survive a SIGKILL, and drain on restart; consistent
+- [ ] pause relays → flood 20 orders → un-pause → all drain, still consistent
+      (the reconnect fix)
+- [ ] no `publish(` call left in any service handler
 - [ ] Stage 3 regression: duplicate mode + 10 orders still ends consistent
-- [ ] `order_db.outbox` has `published_at` set on every row once idle
 
 ## Next
 

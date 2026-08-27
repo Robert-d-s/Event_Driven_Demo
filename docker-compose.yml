@@ -155,6 +155,11 @@ services:
       RABBITMQ_MGMT_URL: http://rabbitmq:15672
       # observer reads every service's DB (read-only) for the consistency panel
       PG_HOST: postgres
+      COMPOSE_PROJECT_NAME: event_driven_demo
+    volumes:
+      # lets the dashboard's "kill <service>" buttons SIGKILL + restart containers
+      # (only the four business services are targetable — see app/api.py)
+      - /var/run/docker.sock:/var/run/docker.sock
 
   dashboard:
     image: node:22-slim

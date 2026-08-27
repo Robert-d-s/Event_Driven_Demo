@@ -70,6 +70,61 @@ def stats() -> dict:
     return snapshot()
 
 
+class KillRequest(BaseModel):
+    service: str  # e.g. "order-service", "payment-service", "inventory-service"
+
+
+# Only these can be targeted, so a stray request can't take down the broker/db.
+_KILLABLE = {
+    "order-service",
+    "payment-service",
+    "inventory-service",
+    "shipping-service",
+}
+
+
+@app.post("/kill")
+def kill(req: KillRequest) -> dict:
+    """
+    SIGKILL a service's container(s) then start them again — the dashboard's way
+    of triggering "process dies mid-flight" without a terminal. Uses the Docker
+    Engine API over the socket mounted at /var/run/docker.sock (see compose).
+    """
+    if req.service not in _KILLABLE:
+        return {"error": f"not killable: {req.service}", "allowed": sorted(_KILLABLE)}
+
+    import docker  # docker SDK; imported here so observer starts even without it
+    from docker.errors import APIError
+
+    project = os.environ.get("COMPOSE_PROJECT_NAME", "event_driven_demo")
+    try:
+        client = docker.from_env()
+        containers = client.containers.list(
+            all=True,
+            filters={
+                "label": [
+                    f"com.docker.compose.project={project}",
+                    f"com.docker.compose.service={req.service}",
+                ]
+            },
+        )
+        for c in containers:
+            try:
+                c.kill(signal="SIGKILL")
+            except APIError:
+                pass  # already stopped
+        for c in containers:
+            c.start()
+        print(
+            f"[observer] killed + restarted {req.service} "
+            f"({len(containers)} container(s))",
+            flush=True,
+        )
+        return {"killed": req.service, "containers": len(containers)}
+    except Exception as err:  # noqa: BLE001
+        return {"error": str(err)}
+
+
 @app.get("/queues")
 async def queues() -> list[dict]:
     """Queue depths straight from the broker's management API."""

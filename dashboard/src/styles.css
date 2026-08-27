@@ -312,3 +312,25 @@ button:disabled {
 .consistency tr.warn-row td {
   color: var(--warn);
 }
+
+/* --- scenario runners row --- */
+.scenarios {
+  margin-top: -6px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+  flex-wrap: wrap;
+}
+.scen-label {
+  color: var(--muted);
+  font-size: 11px;
+  align-self: center;
+}
+.scenarios button {
+  background: #223; 
+  color: var(--text);
+  border: 1px solid var(--border);
+  font-size: 12px;
+}
+.scenarios button:not(:disabled):hover {
+  border-color: var(--accent);
+}

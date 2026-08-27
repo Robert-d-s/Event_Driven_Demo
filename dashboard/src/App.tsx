@@ -105,6 +105,66 @@ export function App() {
     send(v);
   }
 
+  async function killService(service: string) {
+    await fetch("/api/observer/kill", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ service }),
+    });
+  }
+
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  // Self-contained scenario runners — no terminal needed.
+  const [scenario, setScenario] = useState<string | null>(null);
+
+  async function runOutboxScenario() {
+    setScenario("outbox");
+    try {
+      await sendControl("all", "pause_relay", true);
+      setToggles((t) => ({ ...t, pauseRelay: true }));
+      await sleep(500);
+      await placeOrders(5);
+      await sleep(2500);
+      await killService("order-service");
+      await sleep(2500);
+      await sendControl("all", "pause_relay", false);
+      setToggles((t) => ({ ...t, pauseRelay: false }));
+    } finally {
+      setTimeout(() => setScenario(null), 12000);
+    }
+  }
+
+  async function runDlqScenario() {
+    setScenario("dlq");
+    try {
+      await sendControl("payment", "fail", true);
+      setToggles((t) => ({ ...t, paymentFail: true }));
+      await sleep(500);
+      await placeOrders(3);
+      await sleep(18000); // 3 attempts × 5s + slack
+      await sendControl("payment", "fail", false);
+      setToggles((t) => ({ ...t, paymentFail: false }));
+    } finally {
+      setScenario(null);
+    }
+  }
+
+  async function runDuplicateScenario() {
+    setScenario("duplicate");
+    try {
+      await sendControl("all", "duplicate", true);
+      setToggles((t) => ({ ...t, duplicate: true }));
+      await sleep(500);
+      await placeOrders(10);
+      await sleep(6000);
+      await sendControl("all", "duplicate", false);
+      setToggles((t) => ({ ...t, duplicate: false }));
+    } finally {
+      setScenario(null);
+    }
+  }
+
   const dlqTotal = queues
     .filter((q) => q.name.endsWith(".dlq"))
     .reduce((sum, q) => sum + q.ready, 0);
@@ -191,6 +251,41 @@ export function App() {
         >
           RabbitMQ management ↗
         </a>
+      </div>
+
+      <div className="controls scenarios">
+        <span className="scen-label">Scenarios (no terminal):</span>
+        <button
+          disabled={scenario !== null || busy}
+          onClick={runDuplicateScenario}
+        >
+          {scenario === "duplicate" ? "running…" : "▶ Stage 3 — duplicate storm"}
+        </button>
+        <button disabled={scenario !== null || busy} onClick={runDlqScenario}>
+          {scenario === "dlq" ? "running…" : "▶ Stage 2 — retries → DLQ"}
+        </button>
+        <button
+          disabled={scenario !== null || busy}
+          onClick={runOutboxScenario}
+        >
+          {scenario === "outbox"
+            ? "running…"
+            : "▶ Stage 4 — pause relays, kill order-service"}
+        </button>
+        <span className="sep" />
+        <span className="scen-label">Kill (SIGKILL + restart):</span>
+        {["order-service", "payment-service", "inventory-service", "shipping-service"].map(
+          (s) => (
+            <button
+              key={s}
+              className="toggle"
+              disabled={scenario !== null}
+              onClick={() => killService(s)}
+            >
+              ✗ {s.replace("-service", "")}
+            </button>
+          ),
+        )}
       </div>
 
       <div className="grid">

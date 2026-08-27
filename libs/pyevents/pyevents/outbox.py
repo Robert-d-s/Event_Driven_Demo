@@ -52,6 +52,7 @@ import json
 import time
 from typing import Iterator
 
+import pika.exceptions
 import psycopg
 
 from .connection import connect
@@ -119,26 +120,52 @@ def relay_loop(
     Runs on its own thread in each service (see the services' main()). Its own DB
     connection — never shares the handler's.
 
-    Crash safety: a row is marked published only after publish() returns. Crash
-    before that and the row is re-published next run. Consumers are idempotent
-    (Stage 3), so a re-publish is harmless.
+    Crash safety, two layers:
+      - a row is marked published only after publish() returns, all inside one
+        transaction, so a crash before COMMIT rolls the claim back and the rows
+        are retried;
+      - the RabbitMQ connection is rebuilt if it drops (an idle relay's
+        connection can be closed by the broker on missed heartbeats, then a
+        burst of rows hits a dead channel). Without this the relay thread would
+        die silently and its outbox would stop draining forever.
+    Consumers are idempotent (Stage 3), so a re-publish after a reconnect is
+    harmless.
     """
     db = psycopg.connect(dsn, autocommit=False)
     run_script(db, OUTBOX_DDL)  # advisory-locked; safe alongside the handler's schema init
 
-    amqp = connect()
-    ch = amqp.channel()
-    ch.exchange_declare(exchange=exchange, exchange_type="topic", durable=True)
-
+    ch = _open_channel(exchange)
     print(f"[outbox-relay] running (exchange={exchange}, poll={poll_interval}s)", flush=True)
 
     while True:
         if _RELAY_PAUSED:
             time.sleep(poll_interval)
             continue
-        published = _drain_once(db, ch, exchange=exchange, batch=batch)
+        try:
+            published = _drain_once(db, ch, exchange=exchange, batch=batch)
+        except (
+            pika.exceptions.AMQPError,
+            pika.exceptions.ChannelWrongStateError,
+            pika.exceptions.ConnectionWrongStateError,
+            pika.exceptions.StreamLostError,
+        ) as err:
+            # The batch's DB transaction was rolled back by _drain_once's own
+            # error handling (or never committed), so nothing is marked
+            # published prematurely. Rebuild the channel and retry next tick.
+            print(f"[outbox-relay] broker connection lost ({err!r}); reconnecting", flush=True)
+            db.rollback()
+            ch = _open_channel(exchange)
+            time.sleep(poll_interval)
+            continue
         if published == 0:
             time.sleep(poll_interval)
+
+
+def _open_channel(exchange: str):
+    amqp = connect()
+    ch = amqp.channel()
+    ch.exchange_declare(exchange=exchange, exchange_type="topic", durable=True)
+    return ch
 
 
 def _drain_once(
@@ -154,28 +181,34 @@ def _drain_once(
     `FOR UPDATE SKIP LOCKED` lets several relays (one per service replica) run
     against the same outbox without stepping on each other: each grabs a
     different set of rows and any row another relay already holds is skipped.
-    The whole batch — claim, publish, mark — is one transaction, so a crash
-    before COMMIT rolls the claim back and the rows are retried by someone.
+    The whole batch — claim, publish, mark — is one transaction, so if publish()
+    throws partway through, the whole claim is rolled back (nothing marked
+    published) and the caller reconnects and retries.
     """
-    with db.cursor() as cur:
-        cur.execute(
-            "SELECT id, routing_key, body FROM outbox "
-            "WHERE published_at IS NULL ORDER BY id LIMIT %s "
-            "FOR UPDATE SKIP LOCKED",
-            (batch,),
-        )
-        rows = cur.fetchall()
-
-        if not rows:
-            db.rollback()
-            return 0
-
-        for row_id, routing_key, body in rows:
-            publish(ch, exchange=exchange, routing_key=routing_key, body=body)
+    try:
+        with db.cursor() as cur:
             cur.execute(
-                "UPDATE outbox SET published_at = now() WHERE id = %s", (row_id,)
+                "SELECT id, routing_key, body FROM outbox "
+                "WHERE published_at IS NULL ORDER BY id LIMIT %s "
+                "FOR UPDATE SKIP LOCKED",
+                (batch,),
             )
+            rows = cur.fetchall()
 
-    db.commit()
+            if not rows:
+                db.rollback()
+                return 0
+
+            for row_id, routing_key, body in rows:
+                publish(ch, exchange=exchange, routing_key=routing_key, body=body)
+                cur.execute(
+                    "UPDATE outbox SET published_at = now() WHERE id = %s", (row_id,)
+                )
+
+        db.commit()
+    except Exception:
+        db.rollback()  # release the row claims; nothing was marked published
+        raise
+
     print(f"[outbox-relay] published {len(rows)} event(s)", flush=True)
     return len(rows)
