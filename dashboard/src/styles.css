@@ -367,3 +367,7 @@ button:disabled {
 .saga-log li.saga-timeout .saga-kind { color: var(--bad); }
 .saga-log li.saga-state .saga-detail { color: var(--text); font-weight: 500; }
 .saga-detail { color: var(--muted); }
+
+.consistency .muted-inline {
+  color: var(--muted);
+}

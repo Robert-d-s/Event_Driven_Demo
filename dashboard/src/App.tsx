@@ -403,32 +403,48 @@ export function App() {
                   <td className="num">{stats.orders}</td>
                   <td />
                 </tr>
-                <tr className={stats.orders === stats.payment_rows ? "" : "bad-row"}>
+                <tr>
+                  <td>
+                    &nbsp;&nbsp;completed{" "}
+                    <span className="muted-inline">/ cancelled</span>
+                  </td>
+                  <td className="num">
+                    {stats.shipped}{" "}
+                    <span className="muted-inline">/ {stats.cancelled}</span>
+                  </td>
+                  <td />
+                </tr>
+                <tr className="spacer">
+                  <td colSpan={3} />
+                </tr>
+                {/* completed orders' footprint should line up exactly;
+                    cancelled orders leave nothing (compensation removed it) */}
+                <tr className={stats.shipped === stats.payment_rows ? "" : "bad-row"}>
                   <td>payments recorded</td>
                   <td className="num">{stats.payment_rows}</td>
-                  <td>{stats.orders === stats.payment_rows ? "✓" : "✗"}</td>
+                  <td>{stats.shipped === stats.payment_rows ? "✓" : "✗"}</td>
                 </tr>
-                <tr className={stats.orders === stats.reservations ? "" : "bad-row"}>
+                <tr className={stats.shipped === stats.reservations ? "" : "bad-row"}>
                   <td>stock reservations</td>
                   <td className="num">{stats.reservations}</td>
-                  <td>{stats.orders === stats.reservations ? "✓" : "✗"}</td>
+                  <td>{stats.shipped === stats.reservations ? "✓" : "✗"}</td>
                 </tr>
-                <tr className={stats.orders === stats.shipments ? "" : "bad-row"}>
+                <tr className={stats.shipped === stats.shipments ? "" : "bad-row"}>
                   <td>shipments</td>
                   <td className="num">{stats.shipments}</td>
-                  <td>{stats.orders === stats.shipments ? "✓" : "✗"}</td>
+                  <td>{stats.shipped === stats.shipments ? "✓" : "✗"}</td>
                 </tr>
                 <tr className="spacer">
                   <td colSpan={3} />
                 </tr>
                 <tr>
-                  <td>Σ order totals</td>
-                  <td className="num">{money(stats.orders_total_cents)}</td>
+                  <td>Σ completed-order totals</td>
+                  <td className="num">{money(stats.shipped_total_cents)}</td>
                   <td />
                 </tr>
                 <tr
                   className={
-                    stats.orders_total_cents === stats.payment_total_cents
+                    stats.shipped_total_cents === stats.payment_total_cents
                       ? ""
                       : "bad-row"
                   }
@@ -436,7 +452,7 @@ export function App() {
                   <td>Σ charged (payment ledger)</td>
                   <td className="num">{money(stats.payment_total_cents)}</td>
                   <td>
-                    {stats.orders_total_cents === stats.payment_total_cents
+                    {stats.shipped_total_cents === stats.payment_total_cents
                       ? "✓"
                       : "✗ drifted"}
                   </td>
@@ -444,7 +460,7 @@ export function App() {
                 <tr className="spacer">
                   <td colSpan={3} />
                 </tr>
-                <tr>
+                <tr className={stats.stock_consumed === stats.reservations ? "" : "bad-row"}>
                   <td>stock consumed</td>
                   <td className="num">{stats.stock_consumed}</td>
                   <td>
@@ -470,11 +486,9 @@ export function App() {
             </table>
           )}
           <p className="legend">
-            {toggles.pauseRelay
-              ? "relays paused — staged events pile up in the DB. SIGKILL a service now; on restart its relay drains the outbox and the order still completes. Nothing lost."
-              : toggles.duplicate
-              ? "duplicate mode ON — every event published twice. Rows stay ✓ because consumers dedupe."
-              : "outbox rows sit >0 only briefly. Try “pause outbox relays”, place orders, watch them pile up, then un-pause."}
+            Rows compare the footprint of <em>completed</em> orders. A cancelled
+            order leaves nothing — the compensation removed its payment,
+            reservation and shipment.
           </p>
         </section>
       </div>
