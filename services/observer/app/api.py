@@ -46,8 +46,8 @@ def health() -> dict:
 
 
 class Command(BaseModel):
-    target: str  # "payment" | "inventory" | "shipping"
-    action: str  # "fail" | "slow_ms"
+    target: str = "all"  # "payment" | "inventory" | "shipping" | "all"
+    action: str  # "fail" | "slow_ms" | "duplicate"
     value: bool | int
 
 
@@ -60,6 +60,14 @@ def control(cmd: Command) -> dict:
     publish_command(cmd.model_dump())
     print(f"[observer] control command: {cmd.model_dump()}", flush=True)
     return {"sent": cmd.model_dump()}
+
+
+@app.get("/stats")
+def stats() -> dict:
+    """Cross-service consistency snapshot — see app/stats.py."""
+    from .stats import snapshot
+
+    return snapshot()
 
 
 @app.get("/queues")

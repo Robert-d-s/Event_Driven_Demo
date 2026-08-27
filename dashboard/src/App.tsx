@@ -1,7 +1,10 @@
 import { useMemo, useState } from "react";
 import { useEventStream } from "./useEventStream";
 import { useQueues } from "./useQueues";
+import { useStats } from "./useStats";
 import type { BusEvent, OrderStatus, OrderView } from "./types";
+
+const money = (cents: number) => `$${(cents / 100).toFixed(2)}`;
 
 const STATUS_FROM_KEY: Record<string, OrderStatus> = {
   "order.placed": "PENDING",
@@ -47,17 +50,20 @@ type Toggles = {
   paymentFail: boolean;
   shippingFail: boolean;
   inventorySlow: boolean;
+  duplicate: boolean;
 };
 
 export function App() {
   const { events, connected } = useEventStream();
   const queues = useQueues();
+  const stats = useStats();
   const orders = useMemo(() => deriveOrders(events), [events]);
   const [busy, setBusy] = useState(false);
   const [toggles, setToggles] = useState<Toggles>({
     paymentFail: false,
     shippingFail: false,
     inventorySlow: false,
+    duplicate: false,
   });
 
   async function placeOrders(n: number) {
@@ -79,12 +85,22 @@ export function App() {
     }
   }
 
-  async function sendControl(target: string, action: string, value: boolean | number) {
+  async function sendControl(
+    target: string,
+    action: string,
+    value: boolean | number,
+  ) {
     await fetch("/api/observer/control", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ target, action, value }),
     });
+  }
+
+  function toggle(key: keyof Toggles, send: (v: boolean) => void) {
+    const v = !toggles[key];
+    setToggles((t) => ({ ...t, [key]: v }));
+    send(v);
   }
 
   const dlqTotal = queues
@@ -103,6 +119,14 @@ export function App() {
             {dlqTotal} in DLQ
           </span>
         )}
+        {stats && (
+          <span
+            className={stats.consistent ? "dot ok" : "dot bad"}
+            title="order totals vs. what each service recorded"
+          >
+            {stats.consistent ? "consistent" : "INCONSISTENT"}
+          </span>
+        )}
       </header>
 
       <div className="controls">
@@ -114,32 +138,37 @@ export function App() {
         </button>
         <span className="sep" />
         <button
+          className={toggles.duplicate ? "toggle on" : "toggle"}
+          title="every service publishes each event twice"
+          onClick={() =>
+            toggle("duplicate", (v) => sendControl("all", "duplicate", v))
+          }
+        >
+          {toggles.duplicate ? "✓ " : ""}duplicate everything
+        </button>
+        <button
           className={toggles.paymentFail ? "toggle on" : "toggle"}
-          onClick={() => {
-            const v = !toggles.paymentFail;
-            setToggles((t) => ({ ...t, paymentFail: v }));
-            sendControl("payment", "fail", v);
-          }}
+          onClick={() =>
+            toggle("paymentFail", (v) => sendControl("payment", "fail", v))
+          }
         >
           {toggles.paymentFail ? "✓ " : ""}fail payments
         </button>
         <button
           className={toggles.shippingFail ? "toggle on" : "toggle"}
-          onClick={() => {
-            const v = !toggles.shippingFail;
-            setToggles((t) => ({ ...t, shippingFail: v }));
-            sendControl("shipping", "fail", v);
-          }}
+          onClick={() =>
+            toggle("shippingFail", (v) => sendControl("shipping", "fail", v))
+          }
         >
           {toggles.shippingFail ? "✓ " : ""}fail shipping
         </button>
         <button
           className={toggles.inventorySlow ? "toggle on" : "toggle"}
-          onClick={() => {
-            const v = !toggles.inventorySlow;
-            setToggles((t) => ({ ...t, inventorySlow: v }));
-            sendControl("inventory", "slow_ms", v ? 8000 : 0);
-          }}
+          onClick={() =>
+            toggle("inventorySlow", (v) =>
+              sendControl("inventory", "slow_ms", v ? 8000 : 0),
+            )
+          }
         >
           {toggles.inventorySlow ? "✓ " : ""}slow inventory 8s
         </button>
@@ -239,6 +268,75 @@ export function App() {
             <i className="swatch work" /> work&nbsp;&nbsp;
             <i className="swatch retry" /> retry (waiting out TTL)&nbsp;&nbsp;
             <i className="swatch dlq" /> dead-letter
+          </p>
+        </section>
+
+        <section className="panel consistency">
+          <h2>Cross-service consistency</h2>
+          {!stats && <p className="empty">Waiting for stats…</p>}
+          {stats && (
+            <table>
+              <tbody>
+                <tr>
+                  <td>orders placed</td>
+                  <td className="num">{stats.orders}</td>
+                  <td />
+                </tr>
+                <tr className={stats.orders === stats.payment_rows ? "" : "bad-row"}>
+                  <td>payments recorded</td>
+                  <td className="num">{stats.payment_rows}</td>
+                  <td>{stats.orders === stats.payment_rows ? "✓" : "✗"}</td>
+                </tr>
+                <tr className={stats.orders === stats.reservations ? "" : "bad-row"}>
+                  <td>stock reservations</td>
+                  <td className="num">{stats.reservations}</td>
+                  <td>{stats.orders === stats.reservations ? "✓" : "✗"}</td>
+                </tr>
+                <tr className={stats.orders === stats.shipments ? "" : "bad-row"}>
+                  <td>shipments</td>
+                  <td className="num">{stats.shipments}</td>
+                  <td>{stats.orders === stats.shipments ? "✓" : "✗"}</td>
+                </tr>
+                <tr className="spacer">
+                  <td colSpan={3} />
+                </tr>
+                <tr>
+                  <td>Σ order totals</td>
+                  <td className="num">{money(stats.orders_total_cents)}</td>
+                  <td />
+                </tr>
+                <tr
+                  className={
+                    stats.orders_total_cents === stats.payment_total_cents
+                      ? ""
+                      : "bad-row"
+                  }
+                >
+                  <td>Σ charged (payment ledger)</td>
+                  <td className="num">{money(stats.payment_total_cents)}</td>
+                  <td>
+                    {stats.orders_total_cents === stats.payment_total_cents
+                      ? "✓"
+                      : "✗ drifted"}
+                  </td>
+                </tr>
+                <tr className="spacer">
+                  <td colSpan={3} />
+                </tr>
+                <tr>
+                  <td>stock consumed</td>
+                  <td className="num">{stats.stock_consumed}</td>
+                  <td>
+                    {stats.stock_consumed === stats.reservations ? "✓" : "✗"}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          )}
+          <p className="legend">
+            {toggles.duplicate
+              ? "duplicate mode ON — every event is published twice. These rows stay ✓ because consumers dedupe."
+              : "turn on “duplicate everything”, place orders, and watch these rows stay ✓."}
           </p>
         </section>
       </div>

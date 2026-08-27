@@ -16,10 +16,12 @@ make up              # build + start everything (~1-2 min first run)
 make dashboard       # http://localhost:5173
 make demo-stage-1    # place 20 orders and watch them flow
 make demo-stage-2    # fail payments; watch retries then dead-letter queue
+make demo-stage-3    # duplicate every event; watch consistency hold
 make down            # stop, wipe broker + db
 ```
 
 RabbitMQ management UI: http://localhost:15672 (guest / guest).
+Postgres (for psql poking): `postgresql://demo:demo@localhost:55432/<service>_db`
 
 ## Branches — one per stage
 
@@ -30,18 +32,18 @@ independently; `main` always holds the latest.
 |---|---|
 | `stage-0-1` | skeleton + topology (exchanges/queues/bindings, work queues) |
 | `stage-2` | acks, retries, backoff, dead-letter queues, failure toggles |
-| `stage-3` | duplicate-safe consumers *(coming)* |
+| `stage-3` | duplicate-safe (idempotent) consumers + per-service Postgres |
 | `stage-4` | transactional outbox *(coming)* |
 | `stage-5` | workflows + compensation *(coming)* |
 
 ```bash
-git checkout stage-2 && make down && make up   # switch stages
+git checkout stage-3 && make down && make up   # switch stages
 ```
 
-Queue definitions are immutable once declared, so always `make down` before
-switching branches.
+Queue definitions and DB schemas differ between stages, so always `make down`
+before switching branches.
 
-**You are on: `stage-2`.**
+**You are on: `stage-3`.**
 
 ## The system
 
@@ -70,8 +72,8 @@ keep the events an honest language-neutral contract (see [contracts/](contracts/
 | 0 | Walking skeleton — one message, end to end, on screen | [docs/stage-0.md](docs/stage-0.md) | ✅ built |
 | 1 | Exchanges, queues, bindings; work queues vs. fan-out | [docs/stage-1.md](docs/stage-1.md) | ✅ built |
 | 2 | Acks, retries, backoff, dead-letter queues | [docs/stage-2.md](docs/stage-2.md) | ✅ built |
-| 3 | Duplicate-safe (idempotent) consumers | on branch `stage-3` | ⏳ next |
-| 4 | The transactional outbox | _docs/stage-4.md_ | ⏳ |
+| 3 | Duplicate-safe (idempotent) consumers | [docs/stage-3.md](docs/stage-3.md) | ✅ built |
+| 4 | The transactional outbox | on branch `stage-4` | ⏳ next |
 | 5 | Workflows + compensation (undoing a multi-step process) | _docs/stage-5.md_ | ⏳ |
 
 Explicitly **not** in scope: Kafka, event sourcing, CQRS, schema registries,

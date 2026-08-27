@@ -12,9 +12,10 @@ would be coupled at import time — a shared library is exactly the trap that ma
 """
 
 from .connection import connect, BROKER_URL, Channel
-from .publisher import publish, Publisher
+from .publisher import publish, Publisher, set_duplicate_mode, duplicate_mode
 from .consumer import consume, Message
 from .control import listen_for_commands, publish_command
+from .db import connect_db, ensure_processed_events, process_once, run_script, DB_URL
 
 __all__ = [
     "connect",
@@ -22,8 +23,15 @@ __all__ = [
     "Channel",
     "publish",
     "Publisher",
+    "set_duplicate_mode",
+    "duplicate_mode",
     "consume",
     "Message",
     "listen_for_commands",
     "publish_command",
+    "connect_db",
+    "ensure_processed_events",
+    "process_once",
+    "run_script",
+    "DB_URL",
 ]

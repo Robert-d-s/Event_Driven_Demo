@@ -20,15 +20,38 @@ handler, the outbox relay. A pika BlockingConnection that sits idle between
 requests stops sending heartbeats, so RabbitMQ closes it after ~60s and the next
 publish throws ChannelWrongStateError. `Publisher` hides that: it checks the
 channel is open before each publish and transparently reconnects if not.
+
+--- Stage 3: the duplicate switch -------------------------------------------
+
+`set_duplicate_mode(True)` makes every publish emit the message TWICE. The
+dashboard flips this via the control channel to prove the idempotency work: with
+consumers guarded, doubling every event changes nothing; without, totals drift.
+This is a deliberately crude way to force duplicates — real ones come from
+crashes and retries, which are harder to trigger on demand.
 """
 
 import json
+import threading
 from datetime import datetime, timezone
 
 import pika
 import pika.exceptions
 
 from .connection import Channel, connect
+
+# Flipped by the control channel (see each service's _on_command). Module-level
+# so both publish() and Publisher see it. A single bool — no lock needed.
+_DUPLICATE_MODE = False
+
+
+def set_duplicate_mode(on: bool) -> None:
+    global _DUPLICATE_MODE
+    _DUPLICATE_MODE = bool(on)
+    print(f"[publish] duplicate mode -> {_DUPLICATE_MODE}", flush=True)
+
+
+def duplicate_mode() -> bool:
+    return _DUPLICATE_MODE
 
 
 def publish(
@@ -48,19 +71,21 @@ def publish(
     observer reads these; later stages lean on `message_id` for idempotency.
     """
     payload = json.dumps(body).encode("utf-8")
-    channel.basic_publish(
-        exchange=exchange,
-        routing_key=routing_key,
-        body=payload,
-        properties=pika.BasicProperties(
-            content_type="application/json",
-            delivery_mode=2,  # persistent
-            message_id=str(body.get("event_id", "")),
-            timestamp=int(datetime.now(timezone.utc).timestamp()),
-            type=routing_key,
-        ),
+    props = pika.BasicProperties(
+        content_type="application/json",
+        delivery_mode=2,  # persistent
+        message_id=str(body.get("event_id", "")),
+        timestamp=int(datetime.now(timezone.utc).timestamp()),
+        type=routing_key,
     )
-    print(f"[publish] {routing_key} -> exchange '{exchange}': {body}", flush=True)
+
+    times = 2 if _DUPLICATE_MODE else 1
+    for i in range(times):
+        channel.basic_publish(
+            exchange=exchange, routing_key=routing_key, body=payload, properties=props
+        )
+    suffix = "  (x2 — duplicate mode)" if times == 2 else ""
+    print(f"[publish] {routing_key} -> exchange '{exchange}': {body}{suffix}", flush=True)
 
 
 class Publisher:
@@ -83,8 +108,6 @@ class Publisher:
         self._exchange_type = exchange_type
         self._conn: pika.BlockingConnection | None = None
         self._channel: Channel | None = None
-        import threading
-
         self._lock = threading.Lock()
         self._open()
 

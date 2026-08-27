@@ -29,7 +29,8 @@ services:
     image: postgres:16
     container_name: postgres-db
     ports:
-      - "5432:5432"
+      # host 55432 (5432/5433 often taken by other local postgres); containers use 5432
+      - "55432:5432"
     environment:
       POSTGRES_USER: demo
       POSTGRES_PASSWORD: demo
@@ -55,6 +56,7 @@ services:
     restart: "no"
 
   # ---- services ----------------------------------------------------------
+  # Each Python consumer service gets its own database (see infra/postgres/init.sql).
   order-service:
     build:
       context: .
@@ -66,8 +68,11 @@ services:
     depends_on:
       topology:
         condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
     environment:
       BROKER_URL: amqp://guest:guest@rabbitmq:5672/%2F
+      DB_URL: postgresql://demo:demo@postgres:5432/order_db
 
   payment-service:
     build:
@@ -78,10 +83,13 @@ services:
     depends_on:
       topology:
         condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
     environment:
       BROKER_URL: amqp://guest:guest@rabbitmq:5672/%2F
+      DB_URL: postgresql://demo:demo@postgres:5432/payment_db
       FAIL_PAYMENTS: "false" # stage 2 flips this
-    # Competing consumers: 3 replicas, all reading payment.q.
+    # Competing consumers: 3 replicas, all reading payment.q AND the same payment_db.
     deploy:
       replicas: 3
 
@@ -94,8 +102,11 @@ services:
     depends_on:
       topology:
         condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
     environment:
       BROKER_URL: amqp://guest:guest@rabbitmq:5672/%2F
+      DB_URL: postgresql://demo:demo@postgres:5432/inventory_db
       SLOW_MS: "0" # stage 2 raises this
 
   shipping-service:
@@ -107,8 +118,11 @@ services:
     depends_on:
       topology:
         condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
     environment:
       BROKER_URL: amqp://guest:guest@rabbitmq:5672/%2F
+      DB_URL: postgresql://demo:demo@postgres:5432/shipping_db
       FAIL_SHIPPING: "false" # stages 2 & 5 flip this
 
   notification-service:
@@ -132,9 +146,13 @@ services:
     depends_on:
       topology:
         condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
     environment:
       BROKER_URL: amqp://guest:guest@rabbitmq:5672/%2F
       RABBITMQ_MGMT_URL: http://rabbitmq:15672
+      # observer reads every service's DB (read-only) for the consistency panel
+      PG_HOST: postgres
 
   dashboard:
     image: node:22-slim

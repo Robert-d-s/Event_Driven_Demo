@@ -3,7 +3,7 @@
 # Stage 0-1 targets. Later stages add demo-stage-2 … demo-stage-5.
 
 .PHONY: help up down logs ps rebuild topology dashboard broker \
-        demo-stage-0 demo-stage-1 demo-stage-2 \
+        demo-stage-0 demo-stage-1 demo-stage-2 demo-stage-3 \
         chaos-poison chaos-kill-payment
 
 help: ## show this help
@@ -64,6 +64,24 @@ demo-stage-2: ## stage 2 — fail payments, place orders, watch retries then DLQ
 	@echo "  Then turn 'fail payments' back OFF (button, or):"
 	@echo "   curl -XPOST localhost:8001/control -H 'content-type: application/json' \\"
 	@echo "     -d '{\"target\":\"payment\",\"action\":\"fail\",\"value\":false}'"
+
+demo-stage-3: ## stage 3 — turn on "duplicate everything", place orders, prove consistency holds
+	@echo "STAGE 3: idempotency."
+	@echo "  1. turning ON 'duplicate everything' — every event is published twice"
+	curl -s -XPOST localhost:8001/control -H 'content-type: application/json' \
+	  -d '{"target":"all","action":"duplicate","value":true}' >/dev/null
+	@echo "  2. placing 10 orders (= 20 of every event on the bus)"
+	./scripts/place_orders.sh 10
+	@sleep 3
+	@echo ""
+	@echo "  Consistency snapshot (every row should be ✓):"
+	@curl -s localhost:8001/stats | python3 -m json.tool
+	@echo ""
+	@echo "  orders == payment_rows == reservations == shipments, and"
+	@echo "  orders_total_cents == payment_total_cents — despite every event arriving twice."
+	@echo "  Turn duplicate mode back off:"
+	@echo "   curl -XPOST localhost:8001/control -H 'content-type: application/json' \\"
+	@echo "     -d '{\"target\":\"all\",\"action\":\"duplicate\",\"value\":false}'"
 
 chaos-poison: ## send an unparseable message — goes straight to DLQ, no retries
 	./scripts/poison.sh
