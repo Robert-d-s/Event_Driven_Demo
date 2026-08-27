@@ -134,7 +134,21 @@ only because we remembered to write that hack. Stage 4 removes the hack.
 - [ ] dashboard consistency panel stays green under duplication
 - [ ] kill inventory mid-message → reservations goes up by 1, not 2
 - [ ] `payment_db.ledger.total_charged_cents` equals the sum of order totals
-      exactly (check in psql: `psql postgresql://demo:demo@localhost:5432/payment_db -c 'select * from ledger'`)
+      exactly
+
+## Poking at the databases
+
+No local `psql` needed — use the container's:
+
+```bash
+docker compose exec postgres psql -U demo -d payment_db -c 'select * from ledger;'
+docker compose exec postgres psql -U demo -d inventory_db -c 'select sku, qty from stock;'
+docker compose exec postgres psql -U demo -d payment_db       # interactive; \dt, \q
+```
+
+Databases: `order_db`, `payment_db`, `inventory_db`, `shipping_db` — each owned
+by one service. If you'd rather use a local client, the server is published on
+`localhost:5432` (`brew install libpq` gives you `psql`).
 
 ## Next
 
