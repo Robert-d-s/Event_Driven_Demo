@@ -2,24 +2,49 @@
 inventory-service — consumer only.
 
 Listens for PaymentCaptured, reserves stock, emits StockReserved.
+Single replica, its own queue (inventory.q).
 
-Single replica, its own queue (inventory.q). One thread, blocking consume loop.
+--- Stage 2 ---------------------------------------------------------------------
+
+Two runtime toggles from the dashboard:
+  - `slow_ms`  — sleep before processing. With prefetch=1 this means the broker
+                 stops handing inventory new messages until the current one is
+                 done, so `inventory.q` visibly backs up. That backlog IS
+                 backpressure — the queue absorbing a rate mismatch.
+  - `fail`     — raise, to send messages down the retry/DLQ path.
 """
 
 import os
+import time
 import uuid
 from datetime import datetime, timezone
 
-from pyevents import connect, consume, publish, Message
+from pyevents import connect, consume, publish, listen_for_commands, Message
 
 QUEUE = "inventory.q"
 EXCHANGE = "orders"
 
-# Stage 2 uses this to demonstrate a slow consumer and prefetch/backpressure.
-SLOW_MS = int(os.environ.get("SLOW_MS", "0"))
+_state = {
+    "slow_ms": int(os.environ.get("SLOW_MS", "0")),
+    "fail": os.environ.get("FAIL_INVENTORY", "false").lower() == "true",
+}
+
+
+def _on_command(command: dict) -> None:
+    if command.get("target") != "inventory":
+        return
+    action = command.get("action")
+    if action == "slow_ms":
+        _state["slow_ms"] = int(command.get("value") or 0)
+        print(f"[inventory-service] slow_ms -> {_state['slow_ms']}", flush=True)
+    elif action == "fail":
+        _state["fail"] = bool(command.get("value"))
+        print(f"[inventory-service] fail -> {_state['fail']}", flush=True)
 
 
 def main() -> None:
+    listen_for_commands(_on_command, service="inventory")
+
     conn = connect()
     ch = conn.channel()
     ch.exchange_declare(exchange=EXCHANGE, exchange_type="topic", durable=True)
@@ -28,12 +53,17 @@ def main() -> None:
 
     def handler(msg: Message) -> None:
         order_id = msg.body["order_id"]
-        print(f"[inventory-service] reserving stock for order {order_id}", flush=True)
+        print(
+            f"[inventory-service] reserving stock for order {order_id} "
+            f"[attempt {msg.attempt}]",
+            flush=True,
+        )
 
-        if SLOW_MS:
-            import time
+        if _state["slow_ms"]:
+            time.sleep(_state["slow_ms"] / 1000)
 
-            time.sleep(SLOW_MS / 1000)
+        if _state["fail"]:
+            raise RuntimeError(f"stock system unavailable for order {order_id} (simulated)")
 
         publish(
             ch,

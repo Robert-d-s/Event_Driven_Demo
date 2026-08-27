@@ -92,6 +92,23 @@ button:disabled {
   color: var(--accent);
 }
 
+.sep {
+  width: 1px;
+  align-self: stretch;
+  background: var(--border);
+  margin: 0 4px;
+}
+
+.toggle {
+  background: #2b303c;
+  color: var(--text);
+  font-weight: 500;
+}
+.toggle.on {
+  background: var(--bad);
+  color: #0b0d10;
+}
+
 .grid {
   display: grid;
   grid-template-columns: 1.4fr 1fr 1fr;
@@ -215,4 +232,43 @@ button:disabled {
   text-align: right;
   color: var(--muted);
   font-size: 11px;
+}
+
+.queues .q-retry .qname {
+  color: var(--warn);
+}
+.queues .q-dlq .qname {
+  color: var(--bad);
+}
+.queues .q-retry .bar i {
+  background: var(--warn);
+}
+.queues .q-dlq .bar i {
+  background: var(--bad);
+}
+
+.legend {
+  margin: 10px 0 0;
+  font-size: 11px;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  margin-right: 4px;
+  vertical-align: middle;
+}
+.swatch.work {
+  background: var(--accent);
+}
+.swatch.retry {
+  background: var(--warn);
+}
+.swatch.dlq {
+  background: var(--bad);
 }

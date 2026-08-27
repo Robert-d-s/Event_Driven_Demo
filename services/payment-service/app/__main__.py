@@ -3,16 +3,21 @@ payment-service — consumer only.
 
 Listens for OrderPlaced, "charges" the customer, emits PaymentCaptured.
 
-This service runs as 3 replicas (see docker-compose.yml). All three consume the
-SAME queue, payment.q. RabbitMQ hands each message to exactly one of them. That
-is a "work queue" / "competing consumers" — the way you scale throughput.
+Runs as 3 replicas (docker-compose.yml). All three consume the SAME queue,
+payment.q; RabbitMQ hands each message to exactly one of them — a "work queue" /
+"competing consumers". Contrast notification-service, which has its own queue and
+sees every message.
 
-Contrast with notification-service, which has its own queue and therefore sees
-*every* message. Same broker, same exchange; the only difference is whether the
-consumers share a queue.
+--- Stage 2 ---------------------------------------------------------------------
 
-Single thread, one connection, blocking consume loop. No HTTP, so none of
-order-service's threading dance is needed.
+`fail` is a runtime toggle flipped from the dashboard via the control channel
+(pyevents.listen_for_commands). When on, the handler raises — and you watch the
+retry/DLQ machinery in pyevents.consume kick in: 3 attempts spaced by the retry
+queue's 5s TTL, then the message lands in payment.q.dlq.
+
+The control listener runs on its own thread with its own connection; the consume
+loop is blocking on the main thread. They share one module-level dict — a single
+bool write/read needs no lock in CPython.
 """
 
 import os
@@ -20,21 +25,31 @@ import socket
 import uuid
 from datetime import datetime, timezone
 
-from pyevents import connect, consume, publish, Message
+from pyevents import connect, consume, publish, listen_for_commands, Message
 
 QUEUE = "payment.q"
 EXCHANGE = "orders"
 
-# Identifies which replica handled a message, so the dashboard can show work
-# being split across the three.
 WORKER_ID = os.environ.get("HOSTNAME", socket.gethostname())
 
-# Stage 2 flips this from the dashboard to demonstrate retries. For stage 1 it
-# stays off and every payment succeeds.
-FAIL_PAYMENTS = os.environ.get("FAIL_PAYMENTS", "false").lower() == "true"
+# Runtime-toggloable behaviour. Starts from env (compose default), then the
+# dashboard can flip it live.
+_state = {
+    "fail": os.environ.get("FAIL_PAYMENTS", "false").lower() == "true",
+}
+
+
+def _on_command(command: dict) -> None:
+    if command.get("target") != "payment":
+        return
+    if command.get("action") == "fail":
+        _state["fail"] = bool(command.get("value"))
+        print(f"[payment-service/{WORKER_ID}] fail -> {_state['fail']}", flush=True)
 
 
 def main() -> None:
+    listen_for_commands(_on_command, service="payment")
+
     conn = connect()
     ch = conn.channel()
     ch.exchange_declare(exchange=EXCHANGE, exchange_type="topic", durable=True)
@@ -46,11 +61,11 @@ def main() -> None:
         amount = msg.body["total_cents"]
         print(
             f"[payment-service/{WORKER_ID}] charging order {order_id} "
-            f"({amount} cents)",
+            f"({amount} cents) [attempt {msg.attempt}]",
             flush=True,
         )
 
-        if FAIL_PAYMENTS:
+        if _state["fail"]:
             raise RuntimeError(f"payment declined for order {order_id} (simulated)")
 
         publish(

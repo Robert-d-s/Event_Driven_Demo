@@ -15,6 +15,7 @@ Almost all the complexity below is downstream of that one difference.
 make up              # build + start everything (~1-2 min first run)
 make dashboard       # http://localhost:5173
 make demo-stage-1    # place 20 orders and watch them flow
+make demo-stage-2    # fail payments; watch retries then dead-letter queue
 make down            # stop, wipe broker + db
 ```
 
@@ -40,7 +41,7 @@ git checkout stage-2 && make down && make up   # switch stages
 Queue definitions are immutable once declared, so always `make down` before
 switching branches.
 
-**You are on: `stage-0-1`.**
+**You are on: `stage-2`.**
 
 ## The system
 
@@ -68,8 +69,8 @@ keep the events an honest language-neutral contract (see [contracts/](contracts/
 |---|---|---|---|
 | 0 | Walking skeleton — one message, end to end, on screen | [docs/stage-0.md](docs/stage-0.md) | ✅ built |
 | 1 | Exchanges, queues, bindings; work queues vs. fan-out | [docs/stage-1.md](docs/stage-1.md) | ✅ built |
-| 2 | Acks, retries, backoff, dead-letter queues | on branch `stage-2` | ⏳ |
-| 3 | Duplicate-safe (idempotent) consumers | _docs/stage-3.md_ | ⏳ |
+| 2 | Acks, retries, backoff, dead-letter queues | [docs/stage-2.md](docs/stage-2.md) | ✅ built |
+| 3 | Duplicate-safe (idempotent) consumers | on branch `stage-3` | ⏳ next |
 | 4 | The transactional outbox | _docs/stage-4.md_ | ⏳ |
 | 5 | Workflows + compensation (undoing a multi-step process) | _docs/stage-5.md_ | ⏳ |
 

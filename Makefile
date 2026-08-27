@@ -3,7 +3,8 @@
 # Stage 0-1 targets. Later stages add demo-stage-2 … demo-stage-5.
 
 .PHONY: help up down logs ps rebuild topology dashboard broker \
-        demo-stage-0 demo-stage-1
+        demo-stage-0 demo-stage-1 demo-stage-2 \
+        chaos-poison chaos-kill-payment
 
 help: ## show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -48,3 +49,27 @@ demo-stage-1: ## stage 1 — place 20 orders; watch payment split across 3 repli
 	@echo "  - notification-service has its own queue -> sees all 20"
 	@echo "  Compare in 'docker compose logs payment-service' vs 'logs notification-service'"
 	./scripts/place_orders.sh 20
+
+demo-stage-2: ## stage 2 — fail payments, place orders, watch retries then DLQ
+	@echo "STAGE 2: retry + dead-letter."
+	@echo "  1. turning ON 'fail payments' (via the control channel)"
+	curl -s -XPOST localhost:8001/control -H 'content-type: application/json' \
+	  -d '{"target":"payment","action":"fail","value":true}' >/dev/null
+	@echo "  2. placing 3 orders"
+	./scripts/place_orders.sh 3
+	@echo ""
+	@echo "  Now watch the dashboard Queues panel:"
+	@echo "   - payment.q.retry fills, drains every 5s, fills again (3 attempts)"
+	@echo "   - after ~15s, payment.q.dlq gets the 3 messages"
+	@echo "  Then turn 'fail payments' back OFF (button, or):"
+	@echo "   curl -XPOST localhost:8001/control -H 'content-type: application/json' \\"
+	@echo "     -d '{\"target\":\"payment\",\"action\":\"fail\",\"value\":false}'"
+
+chaos-poison: ## send an unparseable message — goes straight to DLQ, no retries
+	./scripts/poison.sh
+
+chaos-kill-payment: ## SIGKILL one payment replica mid-work — watch redelivery
+	@echo "killing one payment-service replica (no graceful shutdown)"
+	docker compose kill --signal=SIGKILL payment-service
+	@echo "compose will restart it. Any message it held unacked is redelivered."
+	docker compose up -d payment-service

@@ -43,11 +43,22 @@ function timeOnly(iso: string): string {
   return new Date(iso).toLocaleTimeString([], { hour12: false });
 }
 
+type Toggles = {
+  paymentFail: boolean;
+  shippingFail: boolean;
+  inventorySlow: boolean;
+};
+
 export function App() {
   const { events, connected } = useEventStream();
   const queues = useQueues();
   const orders = useMemo(() => deriveOrders(events), [events]);
   const [busy, setBusy] = useState(false);
+  const [toggles, setToggles] = useState<Toggles>({
+    paymentFail: false,
+    shippingFail: false,
+    inventorySlow: false,
+  });
 
   async function placeOrders(n: number) {
     setBusy(true);
@@ -68,6 +79,18 @@ export function App() {
     }
   }
 
+  async function sendControl(target: string, action: string, value: boolean | number) {
+    await fetch("/api/observer/control", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ target, action, value }),
+    });
+  }
+
+  const dlqTotal = queues
+    .filter((q) => q.name.endsWith(".dlq"))
+    .reduce((sum, q) => sum + q.ready, 0);
+
   return (
     <div className="app">
       <header>
@@ -75,6 +98,11 @@ export function App() {
         <span className={connected ? "dot ok" : "dot bad"}>
           {connected ? "observer connected" : "observer offline"}
         </span>
+        {dlqTotal > 0 && (
+          <span className="dot bad" title="messages in dead-letter queues">
+            {dlqTotal} in DLQ
+          </span>
+        )}
       </header>
 
       <div className="controls">
@@ -83,6 +111,37 @@ export function App() {
         </button>
         <button disabled={busy} onClick={() => placeOrders(20)}>
           Place 20 orders
+        </button>
+        <span className="sep" />
+        <button
+          className={toggles.paymentFail ? "toggle on" : "toggle"}
+          onClick={() => {
+            const v = !toggles.paymentFail;
+            setToggles((t) => ({ ...t, paymentFail: v }));
+            sendControl("payment", "fail", v);
+          }}
+        >
+          {toggles.paymentFail ? "✓ " : ""}fail payments
+        </button>
+        <button
+          className={toggles.shippingFail ? "toggle on" : "toggle"}
+          onClick={() => {
+            const v = !toggles.shippingFail;
+            setToggles((t) => ({ ...t, shippingFail: v }));
+            sendControl("shipping", "fail", v);
+          }}
+        >
+          {toggles.shippingFail ? "✓ " : ""}fail shipping
+        </button>
+        <button
+          className={toggles.inventorySlow ? "toggle on" : "toggle"}
+          onClick={() => {
+            const v = !toggles.inventorySlow;
+            setToggles((t) => ({ ...t, inventorySlow: v }));
+            sendControl("inventory", "slow_ms", v ? 8000 : 0);
+          }}
+        >
+          {toggles.inventorySlow ? "✓ " : ""}slow inventory 8s
         </button>
         <a
           href="http://localhost:15672"
@@ -148,30 +207,39 @@ export function App() {
           <h2>Queues</h2>
           <ul>
             {queues
-              .filter((q) => !q.name.startsWith("amq."))
-              .map((q) => (
-                <li key={q.name}>
-                  <span className="qname">{q.name}</span>
-                  <span className="bar">
-                    <i
-                      style={{
-                        width: `${Math.min(100, q.ready * 6)}%`,
-                      }}
-                    />
-                  </span>
-                  <span className="qcount">
-                    {q.ready}
-                    {q.unacked > 0 && (
-                      <em title="unacknowledged"> +{q.unacked}</em>
-                    )}
-                  </span>
-                  <span className="qcons">{q.consumers}c</span>
-                </li>
-              ))}
+              .filter((q) => !q.name.startsWith("amq.") && !q.name.startsWith("control."))
+              .sort((a, b) => a.name.localeCompare(b.name))
+              .map((q) => {
+                const kind = q.name.endsWith(".dlq")
+                  ? "dlq"
+                  : q.name.endsWith(".retry")
+                    ? "retry"
+                    : "work";
+                return (
+                  <li key={q.name} className={`q-${kind}`}>
+                    <span className="qname">{q.name}</span>
+                    <span className="bar">
+                      <i style={{ width: `${Math.min(100, q.ready * 6)}%` }} />
+                    </span>
+                    <span className="qcount">
+                      {q.ready}
+                      {q.unacked > 0 && (
+                        <em title="unacknowledged (in flight)"> +{q.unacked}</em>
+                      )}
+                    </span>
+                    <span className="qcons">{q.consumers}c</span>
+                  </li>
+                );
+              })}
             {queues.length === 0 && (
               <li className="empty">Waiting for broker…</li>
             )}
           </ul>
+          <p className="legend">
+            <i className="swatch work" /> work&nbsp;&nbsp;
+            <i className="swatch retry" /> retry (waiting out TTL)&nbsp;&nbsp;
+            <i className="swatch dlq" /> dead-letter
+          </p>
         </section>
       </div>
     </div>

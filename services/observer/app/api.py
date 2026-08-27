@@ -16,6 +16,9 @@ import os
 
 import httpx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel
+
+from pyevents import publish_command
 
 app = FastAPI(title="observer")
 
@@ -40,6 +43,23 @@ async def _capture_loop() -> None:
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok", "clients": len(_clients)}
+
+
+class Command(BaseModel):
+    target: str  # "payment" | "inventory" | "shipping"
+    action: str  # "fail" | "slow_ms"
+    value: bool | int
+
+
+@app.post("/control")
+def control(cmd: Command) -> dict:
+    """
+    Fan a failure-lab command out to every service via the control exchange.
+    The dashboard's "Break something" buttons POST here.
+    """
+    publish_command(cmd.model_dump())
+    print(f"[observer] control command: {cmd.model_dump()}", flush=True)
+    return {"sent": cmd.model_dump()}
 
 
 @app.get("/queues")

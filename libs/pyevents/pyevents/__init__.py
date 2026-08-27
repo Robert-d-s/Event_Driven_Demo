@@ -14,6 +14,7 @@ would be coupled at import time — a shared library is exactly the trap that ma
 from .connection import connect, BROKER_URL, Channel
 from .publisher import publish, Publisher
 from .consumer import consume, Message
+from .control import listen_for_commands, publish_command
 
 __all__ = [
     "connect",
@@ -23,4 +24,6 @@ __all__ = [
     "Publisher",
     "consume",
     "Message",
+    "listen_for_commands",
+    "publish_command",
 ]

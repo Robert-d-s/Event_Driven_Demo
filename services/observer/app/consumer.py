@@ -38,4 +38,5 @@ def run_consumer() -> None:
             }
         )
 
-    consume(ch, queue=QUEUE, handler=handler)
+    # retry=False: observer has no retry/DLQ queues and nothing depends on it.
+    consume(ch, queue=QUEUE, handler=handler, retry=False)
